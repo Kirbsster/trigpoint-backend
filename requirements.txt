@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pymongo>=4.15
+pydantic[email]>=2.6
+pydantic-settings>=2.4
+passlib[argon2]>=1.7
+python-jose[cryptography]>=3.3
+google-cloud-storage
+python-multipart

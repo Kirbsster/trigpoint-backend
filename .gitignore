@@ -1,0 +1,27 @@
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Env & secrets
+.env
+.env.*.local
+*.secret*
+*.key
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+# SQLite DBs
+*.db
