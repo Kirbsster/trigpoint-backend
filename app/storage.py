@@ -4,6 +4,9 @@ import uuid
 from typing import Tuple
 from datetime import datetime, timedelta
 
+import google.auth
+from google.auth import impersonated_credentials
+
 from google.cloud import storage
 from fastapi import UploadFile
 
@@ -54,9 +57,41 @@ def download_media(bucket_name: str, key: str) -> bytes:
     return blob.download_as_bytes()
 
 
+# def generate_signed_url(key: str, expires_in: int = 3600) -> str:
+#     """Generate a signed URL for a GCS object in the default bucket."""
+#     bucket = get_bucket()
+#     blob = bucket.blob(key)
+#     expiration = datetime.utcnow() + timedelta(seconds=expires_in)
+#     return blob.generate_signed_url(expiration=expiration, method="GET")
+
+
 def generate_signed_url(key: str, expires_in: int = 3600) -> str:
-    """Generate a signed URL for a GCS object in the default bucket."""
+    """Generate a v4 signed URL for a GCS object in the default bucket.
+
+    Works on Cloud Run without a local key, by using IAM SignBlob via
+    impersonated credentials.
+    """
     bucket = get_bucket()
     blob = bucket.blob(key)
-    expiration = datetime.utcnow() + timedelta(seconds=expires_in)
-    return blob.generate_signed_url(expiration=expiration, method="GET")
+
+    # Get the default credentials and service account email (from Cloud Run)
+    credentials, project_id = google.auth.default()
+
+    # Create impersonated credentials that can SIGN on behalf of this service account.
+    # target_principal is the same service account that Cloud Run is using.
+    signing_credentials = impersonated_credentials.Credentials(
+        source_credentials=credentials,
+        target_principal=credentials.service_account_email,
+        target_scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
+        lifetime=300,  # seconds; short-lived is fine
+    )
+
+    expiration = timedelta(seconds=expires_in)
+
+    # Ask GCS client library to generate a v4 signed URL using those signing creds.
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=expiration,
+        method="GET",
+        credentials=signing_credentials,
+    )

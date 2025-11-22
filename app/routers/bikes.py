@@ -93,7 +93,10 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
             media_doc = await media_items.find_one({"_id": hero_id})
             if media_doc:
                 key = media_doc["storage_key"]
-                hero_url = generate_signed_url(key, expires_in=3600)
+                try:
+                    hero_url = generate_signed_url(key, expires_in=3600)
+                except Exception:
+                    hero_url = None
         out.append(bike_doc_to_out(d, hero_url=hero_url))
 
     return out
