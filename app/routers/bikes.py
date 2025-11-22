@@ -31,7 +31,7 @@ class BikeOut(BaseModel):
     hero_url: Optional[str] = None
 
 
-def bike_doc_to_out(doc) -> BikeOut:
+def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
     return BikeOut(
         id=str(doc["_id"]),
         name=doc["name"],
@@ -41,7 +41,8 @@ def bike_doc_to_out(doc) -> BikeOut:
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
         hero_media_id=(str(doc["hero_media_id"]) if doc.get("hero_media_id") else None),
-        hero_url=doc.get("hero_url"),
+        # prefer the explicit hero_url passed in, fall back to any stored value
+        hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
     )
 
 
