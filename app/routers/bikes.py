@@ -26,6 +26,7 @@ class BikeOut(BaseModel):
     user_id: str
     created_at: datetime
     updated_at: datetime
+    hero_media_id: Optional[str] = None
 
 
 def bike_doc_to_out(doc) -> BikeOut:
@@ -37,6 +38,7 @@ def bike_doc_to_out(doc) -> BikeOut:
         user_id=str(doc["user_id"]),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
+        hero_media_id=(str(doc["hero_media_id"]) if doc.get("hero_media_id") else None),
     )
 
 

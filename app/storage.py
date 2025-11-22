@@ -12,17 +12,23 @@ _client: storage.Client | None = None
 _bucket: storage.Bucket | None = None
 
 
-def get_bucket() -> storage.Bucket:
+def get_bucket(bucket_name: str | None = None) -> storage.Bucket:
+    """Return the default bucket or a named bucket."""
     global _client, _bucket
-    if _bucket is None:
-        _client = storage.Client()
-        _bucket = _client.bucket(GCS_BUCKET_NAME)
-    return _bucket
+    if bucket_name is None or bucket_name == GCS_BUCKET_NAME:
+        if _bucket is None:
+            _client = storage.Client()
+            _bucket = _client.bucket(GCS_BUCKET_NAME)
+        return _bucket
+    # Allow override if you ever store in other buckets
+    client = storage.Client()
+    return client.bucket(bucket_name)
 
 
-async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> str:
-    """Upload an image for a bike and return the GCS storage key."""
+async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> Tuple[str, int]:
+    """Upload an image for a bike and return (GCS storage key, size_bytes)."""
     content = await file.read()
+    size = len(content)
 
     # derive extension
     filename = file.filename or "image"
@@ -37,5 +43,11 @@ async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> str
         content,
         content_type=file.content_type or "application/octet-stream",
     )
+    return key, size
 
-    return key
+
+def download_media(bucket_name: str, key: str) -> bytes:
+    """Download raw bytes for a media object."""
+    bucket = get_bucket(bucket_name)
+    blob = bucket.blob(key)
+    return blob.download_as_bytes()

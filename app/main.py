@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_cookie.router)
     app.include_router(index.router)
     app.include_router(media.router)
+    app.include_router(media.media_router)
     app.include_router(gcs_test.router)
     app.include_router(bikes.router)
 

@@ -2,13 +2,22 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    UploadFile,
+    HTTPException,
+    status,
+    Response,
+)
 from pydantic import BaseModel
 from bson import ObjectId
+import os
 
 from app.db import bikes_col, media_items_col
 from app.routers.auth import get_current_user
-from app.storage import upload_bike_image
+from app.storage import upload_bike_image, download_media, GCS_BUCKET_NAME
 
 router = APIRouter(prefix="/bikes", tags=["media"])
 
@@ -68,18 +77,14 @@ async def upload_hero_image(
     if bike.get("user_id") != user_oid:
         raise HTTPException(status_code=403, detail="Not your bike")
 
-    # Upload to GCS
-    storage_key = await upload_bike_image(str(user_oid), bike_id, file)
-
-    # Build media document
-    content = await file.read()  # NOTE: file was already read; better to capture len before
-    size = len(content)
+    # Upload to GCS via storage_gcs
+    storage_key, size = await upload_bike_image(str(user_oid), bike_id, file)
 
     now = datetime.utcnow()
     media_doc = {
         "user_id": user_oid,
         "bike_id": bike_oid,
-        "bucket": os.getenv("GCS_MEDIA_BUCKET", "trigpoint-media-testing"),
+        "bucket": os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME),
         "storage_key": storage_key,
         "content_type": file.content_type,
         "size_bytes": size,
@@ -97,3 +102,45 @@ async def upload_hero_image(
     )
 
     return media_doc_to_out(media_doc)
+
+
+# second router for serving media bytes via Cloud Run
+media_router = APIRouter(prefix="/media", tags=["media"])
+
+DEFAULT_BUCKET = os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)
+
+
+@media_router.get("/{media_id}")
+async def get_media(
+    media_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Stream a media file from GCS via Cloud Run, enforcing ownership."""
+    media_items = media_items_col()
+
+    try:
+        media_oid = ObjectId(media_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid media_id")
+
+    doc = await media_items.find_one({"_id": media_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    # Check ownership
+    user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
+    if isinstance(user_id, str):
+        user_oid = ObjectId(user_id)
+    else:
+        user_oid = user_id
+
+    if doc.get("user_id") != user_oid:
+        raise HTTPException(status_code=403, detail="Not your media")
+
+    bucket_name = doc.get("bucket", DEFAULT_BUCKET)
+    key = doc["storage_key"]
+    content_type = doc.get("content_type") or "application/octet-stream"
+
+    data = download_media(bucket_name, key)
+
+    return Response(content=data, media_type=content_type)
