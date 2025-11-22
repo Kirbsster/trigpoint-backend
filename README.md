@@ -16,6 +16,7 @@ git init
 add .
 git commit -m "Initial"
 git remote add origin git@github.com:Kirbsster/trigpoint-backend.git
+git verify
 git branch -M main
 git push -u origin main
 # push change

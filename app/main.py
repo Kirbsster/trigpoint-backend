@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .settings import settings
 from .db import ping, ensure_indexes
-from .routers import auth, auth_cookie, index, gcs_test
+from .routers import auth, auth_cookie, index, gcs_test, bikes, media
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=(settings.env.lower() == "dev"))
@@ -30,7 +30,9 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(auth_cookie.router)
     app.include_router(index.router)
+    app.include_router(media.router)
     app.include_router(gcs_test.router)
+    app.include_router(bikes.router)
 
     @app.on_event("startup")
     async def on_startup():
