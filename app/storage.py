@@ -2,6 +2,7 @@
 import os
 import uuid
 from typing import Tuple
+from datetime import datetime, timedelta
 
 from google.cloud import storage
 from fastapi import UploadFile
@@ -51,3 +52,11 @@ def download_media(bucket_name: str, key: str) -> bytes:
     bucket = get_bucket(bucket_name)
     blob = bucket.blob(key)
     return blob.download_as_bytes()
+
+
+def generate_signed_url(key: str, expires_in: int = 3600) -> str:
+    """Generate a signed URL for a GCS object in the default bucket."""
+    bucket = get_bucket()
+    blob = bucket.blob(key)
+    expiration = datetime.utcnow() + timedelta(seconds=expires_in)
+    return blob.generate_signed_url(expiration=expiration, method="GET")

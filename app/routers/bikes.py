@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from bson import ObjectId
 
-from ..db import bikes_col
+from app.db import bikes_col
+from app.storage import generate_signed_url
 from .auth import get_current_user
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
@@ -27,6 +28,7 @@ class BikeOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     hero_media_id: Optional[str] = None
+    hero_url: Optional[str] = None
 
 
 def bike_doc_to_out(doc) -> BikeOut:
@@ -39,6 +41,7 @@ def bike_doc_to_out(doc) -> BikeOut:
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
         hero_media_id=(str(doc["hero_media_id"]) if doc.get("hero_media_id") else None),
+        hero_url=doc.get("hero_url"),
     )
 
 
@@ -70,12 +73,27 @@ async def create_bike(
 
 @router.get("", response_model=List[BikeOut])
 async def list_my_bikes(current_user=Depends(get_current_user)):
-    """List bikes belonging to the logged-in user."""
     user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
     if isinstance(user_id, str):
-        user_id = ObjectId(user_id)
+        user_oid = ObjectId(user_id)
+    else:
+        user_oid = user_id
 
     bikes = bikes_col()
-    cursor = bikes.find({"user_id": user_id})
+    media_items = media_items_col()
+
+    cursor = bikes.find({"user_id": user_oid})
     docs = await cursor.to_list(length=1000)
-    return [bike_doc_to_out(d) for d in docs]
+
+    out: list[BikeOut] = []
+    for d in docs:
+        hero_url: Optional[str] = None
+        hero_id = d.get("hero_media_id")
+        if hero_id:
+            media_doc = await media_items.find_one({"_id": hero_id})
+            if media_doc:
+                key = media_doc["storage_key"]
+                hero_url = generate_signed_url(key, expires_in=3600)
+        out.append(bike_doc_to_out(d, hero_url=hero_url))
+
+    return out
