@@ -136,3 +136,51 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
                     hero_url = None
         out.append(bike_doc_to_out(d, hero_url=hero_url))
     return out
+
+# ---------- Get a single bike (for analyser) ----------
+
+@router.get("/{bike_id}", response_model=BikeOut)
+async def get_bike(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    media_items = media_items_col()
+
+    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    hero_url: Optional[str] = None
+    hero_id = doc.get("hero_media_id")
+
+    if hero_id:
+        media_doc = await media_items.find_one({"_id": hero_id})
+        if media_doc:
+            key = media_doc["storage_key"]
+            try:
+                hero_url = generate_signed_url(key, expires_in=3600)
+            except Exception as e:
+                logger.warning(
+                    "Failed to generate signed URL in get_bike for bike %s, media %s, key %s: %s",
+                    doc.get("_id"),
+                    hero_id,
+                    key,
+                    e,
+                )
+                hero_url = None
+        else:
+            logger.warning(
+                "No media document found for hero_media_id=%s on bike %s",
+                hero_id,
+                doc.get("_id"),
+            )
+
+    return bike_doc_to_out(doc, hero_url=hero_url)
