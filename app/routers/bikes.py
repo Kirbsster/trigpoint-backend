@@ -1,6 +1,7 @@
 # app/routers/bikes.py
 from datetime import datetime
 from typing import Optional, List
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -110,6 +111,10 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
     docs = await cursor.to_list(length=1000)
 
     out: list[BikeOut] = []
+
+
+    logger = logging.getLogger(__name__)
+
     for d in docs:
         hero_url: Optional[str] = None
         hero_id = d.get("hero_media_id")
@@ -119,8 +124,16 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
                 key = media_doc["storage_key"]
                 try:
                     hero_url = generate_signed_url(key, expires_in=3600)
-                except Exception:
+                except Exception as e:
+                    # Extra debug info in logs
+                    logger.warning(
+                        "Failed to generate signed URL for bike %s, media %s, key %s: %s",
+                        d.get("_id"),
+                        hero_id,
+                        key,
+                        e,
+                    )
                     hero_url = None
-        out.append(bike_doc_to_out(d, hero_url=hero_url))
 
+    out.append(bike_doc_to_out(d, hero_url=hero_url))
     return out
