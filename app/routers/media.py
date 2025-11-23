@@ -19,6 +19,7 @@ from app.db import bikes_col, media_items_col
 from app.routers.auth import get_current_user
 from app.storage import upload_bike_image, download_media, GCS_BUCKET_NAME
 
+
 router = APIRouter(prefix="/bikes", tags=["media"])
 
 
@@ -48,6 +49,32 @@ def media_doc_to_out(doc) -> MediaOut:
     )
 
 
+def _extract_user_oid(current_user) -> ObjectId:
+    """Helper to robustly extract a Mongo ObjectId for the current user."""
+    raw_id = None
+
+    # If get_current_user returned a dict-like object
+    if isinstance(current_user, dict):
+        raw_id = current_user.get("id") or current_user.get("_id")
+    else:
+        # Pydantic model / object with attributes
+        raw_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
+
+    if raw_id is None:
+        print("DEBUG media._extract_user_oid: current_user has no id:", repr(current_user))
+        raise HTTPException(status_code=500, detail="Could not determine current user id")
+
+    if isinstance(raw_id, str):
+        try:
+            return ObjectId(raw_id)
+        except Exception:
+            print("DEBUG media._extract_user_oid: failed to convert raw_id to ObjectId:", raw_id)
+            raise HTTPException(status_code=500, detail="Invalid current user id format")
+
+    # raw_id is already an ObjectId (or at least something usable)
+    return raw_id
+
+
 @router.post("/{bike_id}/media/hero", response_model=MediaOut, status_code=status.HTTP_201_CREATED)
 async def upload_hero_image(
     bike_id: str,
@@ -58,7 +85,7 @@ async def upload_hero_image(
     bikes = bikes_col()
     media_items = media_items_col()
 
-    # Validate bike_id and ownership
+    # Validate bike_id
     try:
         bike_oid = ObjectId(bike_id)
     except Exception:
@@ -68,16 +95,15 @@ async def upload_hero_image(
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
 
-    user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
-    if isinstance(user_id, str):
-        user_oid = ObjectId(user_id)
-    else:
-        user_oid = user_id
+    # Extract current user id robustly
+    user_oid = _extract_user_oid(current_user)
 
+    # Ownership check
     if bike.get("user_id") != user_oid:
         raise HTTPException(status_code=403, detail="Not your bike")
 
-    # Upload to GCS via storage_gcs
+    # Upload to GCS via storage
+    # NOTE: this assumes upload_bike_image returns (storage_key, size)
     storage_key, size = await upload_bike_image(str(user_oid), bike_id, file)
 
     now = datetime.utcnow()
@@ -91,7 +117,6 @@ async def upload_hero_image(
         "role": "hero",
         "created_at": now,
     }
-
     result = await media_items.insert_one(media_doc)
     media_doc["_id"] = result.inserted_id
 
@@ -127,13 +152,10 @@ async def get_media(
     if not doc:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    # Check ownership
-    user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
-    if isinstance(user_id, str):
-        user_oid = ObjectId(user_id)
-    else:
-        user_oid = user_id
+    # Extract current user id robustly
+    user_oid = _extract_user_oid(current_user)
 
+    # Ownership check
     if doc.get("user_id") != user_oid:
         raise HTTPException(status_code=403, detail="Not your media")
 
@@ -142,5 +164,4 @@ async def get_media(
     content_type = doc.get("content_type") or "application/octet-stream"
 
     data = download_media(bucket_name, key)
-
     return Response(content=data, media_type=content_type)
