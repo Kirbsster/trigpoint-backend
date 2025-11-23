@@ -167,7 +167,7 @@ def generate_signed_url(key: str, expires_in: int = 3600) -> str:
     # Wrap them in impersonated credentials that can sign
     signing_credentials = impersonated_credentials.Credentials(
         source_credentials=credentials,
-        target_principal=credentials.service_account_email,
+        target_principal = os.getenv("CLOUD_RUN_SERVICE_ACCOUNT"),
         target_scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
         lifetime=300,
     )
