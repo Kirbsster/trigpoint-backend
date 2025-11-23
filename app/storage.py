@@ -145,6 +145,13 @@ async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> tup
     return key, len(content)
 
 
+def download_media(bucket_name: str, key: str) -> bytes:
+    """Download raw bytes for a media object."""
+    bucket = get_bucket(bucket_name)
+    blob = bucket.blob(key)
+    return blob.download_as_bytes()
+
+
 def generate_signed_url(key: str, expires_in: int = 3600) -> str:
     """Generate a v4 signed URL for a GCS object using IAM SignBlob.
 
