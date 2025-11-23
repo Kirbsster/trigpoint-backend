@@ -1,34 +1,40 @@
-# app/storage.py
+# app/storage_gcs.py
 import os
 import uuid
+from typing import Tuple
 from datetime import datetime, timedelta
-from typing import Optional
 
-from fastapi import UploadFile
-from google.cloud import storage
 import google.auth
 from google.auth import impersonated_credentials
 
-# Bucket name for media
+from google.cloud import storage
+from fastapi import UploadFile
+
 GCS_BUCKET_NAME = os.getenv("GCS_MEDIA_BUCKET", "trigpoint-media-testing")
 
-_client: Optional[storage.Client] = None
-_bucket: Optional[storage.Bucket] = None
+_client: storage.Client | None = None
+_bucket: storage.Bucket | None = None
 
 
-def get_bucket() -> storage.Bucket:
-    """Get (and cache) the GCS bucket."""
+def get_bucket(bucket_name: str | None = None) -> storage.Bucket:
+    """Return the default bucket or a named bucket."""
     global _client, _bucket
-    if _bucket is None:
-        _client = storage.Client()
-        _bucket = _client.bucket(GCS_BUCKET_NAME)
-    return _bucket
+    if bucket_name is None or bucket_name == GCS_BUCKET_NAME:
+        if _bucket is None:
+            _client = storage.Client()
+            _bucket = _client.bucket(GCS_BUCKET_NAME)
+        return _bucket
+    # Allow override if you ever store in other buckets
+    client = storage.Client()
+    return client.bucket(bucket_name)
 
 
-async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> str:
-    """Upload an image for a bike and return the GCS storage key."""
+async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> Tuple[str, int]:
+    """Upload an image for a bike and return (GCS storage key, size_bytes)."""
     content = await file.read()
+    size = len(content)
 
+    # derive extension
     filename = file.filename or "image"
     parts = filename.rsplit(".", 1)
     ext = parts[1].lower() if len(parts) == 2 else "bin"
@@ -41,39 +47,48 @@ async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> str
         content,
         content_type=file.content_type or "application/octet-stream",
     )
-    return key
+    return key, size
 
 
 def download_media(bucket_name: str, key: str) -> bytes:
-    """Download a media object from GCS and return its bytes."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    """Download raw bytes for a media object."""
+    bucket = get_bucket(bucket_name)
     blob = bucket.blob(key)
     return blob.download_as_bytes()
 
 
-def generate_signed_url(key: str, expires_in: int = 3600) -> str:
-    """Generate a v4 signed URL for a GCS object.
+# def generate_signed_url(key: str, expires_in: int = 3600) -> str:
+#     """Generate a signed URL for a GCS object in the default bucket."""
+#     bucket = get_bucket()
+#     blob = bucket.blob(key)
+#     expiration = datetime.utcnow() + timedelta(seconds=expires_in)
+#     return blob.generate_signed_url(expiration=expiration, method="GET")
 
-    Works on Cloud Run without a local key by using IAM SignBlob via
+
+def generate_signed_url(key: str, expires_in: int = 3600) -> str:
+    """Generate a v4 signed URL for a GCS object in the default bucket.
+
+    Works on Cloud Run without a local key, by using IAM SignBlob via
     impersonated credentials.
     """
     bucket = get_bucket()
     blob = bucket.blob(key)
 
-    # Get default application credentials (Cloud Run service account).
+    # Get the default credentials and service account email (from Cloud Run)
     credentials, project_id = google.auth.default()
 
-    # Wrap them in impersonated credentials that can sign.
+    # Create impersonated credentials that can SIGN on behalf of this service account.
+    # target_principal is the same service account that Cloud Run is using.
     signing_credentials = impersonated_credentials.Credentials(
         source_credentials=credentials,
         target_principal=credentials.service_account_email,
         target_scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
-        lifetime=300,
+        lifetime=300,  # seconds; short-lived is fine
     )
 
     expiration = timedelta(seconds=expires_in)
 
+    # Ask GCS client library to generate a v4 signed URL using those signing creds.
     return blob.generate_signed_url(
         version="v4",
         expiration=expiration,
