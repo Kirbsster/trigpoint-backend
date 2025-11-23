@@ -134,6 +134,5 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
                         e,
                     )
                     hero_url = None
-
-    out.append(bike_doc_to_out(d, hero_url=hero_url))
+        out.append(bike_doc_to_out(d, hero_url=hero_url))
     return out
