@@ -78,3 +78,24 @@ async def ensure_indexes():
         [("user_id", 1)],
         name="idx_media_user_id",
     )
+
+def sheds_col():
+    return get_db()["sheds"]
+
+async def ensure_indexes():
+    users = get_db()["users"]
+    await users.create_index(
+        [("email_norm", 1)],
+        unique=True,
+        name="uniq_email_norm",
+        partialFilterExpression={"email_norm": {"$type": "string"}},
+    )
+    # optional: shed indexes
+    sheds = sheds_col()
+    await sheds.create_index([("owner_id", 1)], name="shed_owner")
+    await sheds.create_index(
+        [("slug", 1)],
+        unique=True,
+        sparse=True,
+        name="uniq_shed_slug",
+    )
