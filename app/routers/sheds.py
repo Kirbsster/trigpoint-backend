@@ -2,13 +2,14 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from pydantic import BaseModel, Field
 from bson import ObjectId
 
 from app.db import sheds_col, bikes_col
 from app.routers.auth import get_current_user
 from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
+
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
 
@@ -30,11 +31,13 @@ class ShedOut(BaseModel):
     owner_id: Optional[str] = None
     is_featured: bool
     bike_ids: List[str]
+    bike_count: int          # <-- added for frontend
     created_at: datetime
     updated_at: datetime
 
 
 def shed_doc_to_out(doc) -> ShedOut:
+    bike_ids = doc.get("bike_ids", []) or []
     return ShedOut(
         id=str(doc["_id"]),
         name=doc["name"],
@@ -43,7 +46,8 @@ def shed_doc_to_out(doc) -> ShedOut:
         owner_type=doc.get("owner_type", "user"),
         owner_id=str(doc["owner_id"]) if doc.get("owner_id") is not None else None,
         is_featured=bool(doc.get("is_featured", False)),
-        bike_ids=[str(bid) for bid in doc.get("bike_ids", [])],
+        bike_ids=[str(bid) for bid in bike_ids],
+        bike_count=len(bike_ids),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -56,13 +60,16 @@ def _extract_user_oid(current_user) -> ObjectId:
         raw_id = current_user.get("id") or current_user.get("_id")
     else:
         raw_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
+
     if raw_id is None:
         raise HTTPException(status_code=500, detail="Could not determine current user id")
+
     if isinstance(raw_id, str):
         try:
             return ObjectId(raw_id)
         except Exception:
             raise HTTPException(status_code=500, detail="Invalid current user id format")
+
     return raw_id
 
 
@@ -76,6 +83,7 @@ async def create_shed(
     """Create a new user-owned shed."""
     now = datetime.utcnow()
     owner_oid = _extract_user_oid(current_user)
+
     doc = {
         "name": shed_in.name,
         "description": shed_in.description,
@@ -87,6 +95,7 @@ async def create_shed(
         "created_at": now,
         "updated_at": now,
     }
+
     sheds = sheds_col()
     result = await sheds.insert_one(doc)
     doc["_id"] = result.inserted_id
@@ -167,7 +176,6 @@ async def add_bike_to_shed(
             "$set": {"updated_at": datetime.utcnow()},
         },
     )
-
     updated = await sheds.find_one({"_id": shed_oid})
     return shed_doc_to_out(updated)
 
@@ -233,5 +241,33 @@ async def list_bikes_in_shed(
 
     cursor = bikes.find({"_id": {"$in": bike_ids}})
     docs = await cursor.to_list(length=1000)
+
     # Reuse your existing BikeOut converter
     return [bike_doc_to_out(d) for d in docs]
+
+
+# ---------- NEW: delete shed ----------
+
+@router.delete("/{shed_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_shed(
+    shed_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Delete a shed if it belongs to the current user."""
+    sheds = sheds_col()
+
+    try:
+        shed_oid = ObjectId(shed_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid shed_id")
+
+    doc = await sheds.find_one({"_id": shed_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Shed not found")
+
+    owner_oid = _extract_user_oid(current_user)
+    if doc.get("owner_id") != owner_oid:
+        raise HTTPException(status_code=403, detail="Not your shed")
+
+    await sheds.delete_one({"_id": shed_oid})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

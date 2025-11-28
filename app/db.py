@@ -41,6 +41,8 @@ def bikes_col():
 def media_items_col():
     return get_db()["media_items"]
 
+def sheds_col():
+    return get_db()["sheds"]
 
 # ---- Health / indexes ----
 
