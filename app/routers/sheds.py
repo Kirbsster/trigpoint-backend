@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, status, Response
 from pydantic import BaseModel, Field
 from bson import ObjectId
 
-from app.db import sheds_col, bikes_col
+import logging
+
+from app.db import sheds_col, bikes_col, media_items_col
 from app.routers.auth import get_current_user
 from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
-
+from app.storage import generate_signed_url
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
 
@@ -218,10 +220,13 @@ async def list_bikes_in_shed(
     shed_id: str,
     current_user=Depends(get_current_user),
 ):
-    """Return the bikes belonging to a shed, as BikeOut models."""
+    """Return the bikes belonging to a shed, as BikeOut models (with hero_url)."""
     sheds = sheds_col()
     bikes = bikes_col()
+    media_items = media_items_col()
+    logger = logging.getLogger(__name__)
 
+    # Validate shed_id and load shed
     try:
         shed_oid = ObjectId(shed_id)
     except Exception:
@@ -239,11 +244,40 @@ async def list_bikes_in_shed(
     if not bike_ids:
         return []
 
+    # Load all bikes in this shed
     cursor = bikes.find({"_id": {"$in": bike_ids}})
     docs = await cursor.to_list(length=1000)
 
-    # Reuse your existing BikeOut converter
-    return [bike_doc_to_out(d) for d in docs]
+    out: list[BikeOut] = []
+    for d in docs:
+        hero_url: Optional[str] = None
+        hero_id = d.get("hero_media_id")
+        if hero_id:
+            media_doc = await media_items.find_one({"_id": hero_id})
+            if media_doc:
+                key = media_doc["storage_key"]
+                try:
+                    hero_url = generate_signed_url(key, expires_in=3600)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to generate signed URL in list_bikes_in_shed for bike %s, media %s, key %s: %s",
+                        d.get("_id"),
+                        hero_id,
+                        key,
+                        e,
+                    )
+                    hero_url = None
+            else:
+                logger.warning(
+                    "No media document found for hero_media_id=%s on bike %s (shed %s)",
+                    hero_id,
+                    d.get("_id"),
+                    shed_id,
+                )
+
+        out.append(bike_doc_to_out(d, hero_url=hero_url))
+
+    return out
 
 
 # ---------- NEW: delete shed ----------
