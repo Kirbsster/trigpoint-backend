@@ -12,6 +12,7 @@ from app.db import sheds_col, bikes_col, media_items_col
 from app.routers.auth import get_current_user
 from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
 from app.storage import generate_signed_url
+from app.utils_media import resolve_hero_url
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
 
@@ -215,18 +216,77 @@ async def remove_bike_from_shed(
     return shed_doc_to_out(updated)
 
 
+# @router.get("/{shed_id}/bikes", response_model=List[BikeOut])
+# async def list_bikes_in_shed(
+#     shed_id: str,
+#     current_user=Depends(get_current_user),
+# ):
+#     """Return the bikes belonging to a shed, as BikeOut models (with hero_url)."""
+#     sheds = sheds_col()
+#     bikes = bikes_col()
+#     media_items = media_items_col()
+#     logger = logging.getLogger(__name__)
+
+#     # Validate shed_id and load shed
+#     try:
+#         shed_oid = ObjectId(shed_id)
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Invalid shed_id")
+
+#     shed = await sheds.find_one({"_id": shed_oid})
+#     if not shed:
+#         raise HTTPException(status_code=404, detail="Shed not found")
+
+#     owner_oid = _extract_user_oid(current_user)
+#     if shed.get("owner_id") != owner_oid:
+#         raise HTTPException(status_code=403, detail="Not your shed")
+
+#     bike_ids = shed.get("bike_ids", [])
+#     if not bike_ids:
+#         return []
+
+#     # Load all bikes in this shed
+#     cursor = bikes.find({"_id": {"$in": bike_ids}})
+#     docs = await cursor.to_list(length=1000)
+
+#     out: list[BikeOut] = []
+#     for d in docs:
+#         hero_url: Optional[str] = None
+#         hero_id = d.get("hero_media_id")
+#         if hero_id:
+#             media_doc = await media_items.find_one({"_id": hero_id})
+#             if media_doc:
+#                 key = media_doc["storage_key"]
+#                 try:
+#                     hero_url = generate_signed_url(key, expires_in=3600)
+#                 except Exception as e:
+#                     logger.warning(
+#                         "Failed to generate signed URL in list_bikes_in_shed for bike %s, media %s, key %s: %s",
+#                         d.get("_id"),
+#                         hero_id,
+#                         key,
+#                         e,
+#                     )
+#                     hero_url = None
+#             else:
+#                 logger.warning(
+#                     "No media document found for hero_media_id=%s on bike %s (shed %s)",
+#                     hero_id,
+#                     d.get("_id"),
+#                     shed_id,
+#                 )
+
+#         out.append(bike_doc_to_out(d, hero_url=hero_url))
+
+#     return out
 @router.get("/{shed_id}/bikes", response_model=List[BikeOut])
 async def list_bikes_in_shed(
     shed_id: str,
     current_user=Depends(get_current_user),
 ):
-    """Return the bikes belonging to a shed, as BikeOut models (with hero_url)."""
+    """Return the bikes belonging to a shed, as BikeOut models."""
     sheds = sheds_col()
     bikes = bikes_col()
-    media_items = media_items_col()
-    logger = logging.getLogger(__name__)
-
-    # Validate shed_id and load shed
     try:
         shed_oid = ObjectId(shed_id)
     except Exception:
@@ -244,41 +304,16 @@ async def list_bikes_in_shed(
     if not bike_ids:
         return []
 
-    # Load all bikes in this shed
     cursor = bikes.find({"_id": {"$in": bike_ids}})
     docs = await cursor.to_list(length=1000)
 
     out: list[BikeOut] = []
     for d in docs:
-        hero_url: Optional[str] = None
         hero_id = d.get("hero_media_id")
-        if hero_id:
-            media_doc = await media_items.find_one({"_id": hero_id})
-            if media_doc:
-                key = media_doc["storage_key"]
-                try:
-                    hero_url = generate_signed_url(key, expires_in=3600)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to generate signed URL in list_bikes_in_shed for bike %s, media %s, key %s: %s",
-                        d.get("_id"),
-                        hero_id,
-                        key,
-                        e,
-                    )
-                    hero_url = None
-            else:
-                logger.warning(
-                    "No media document found for hero_media_id=%s on bike %s (shed %s)",
-                    hero_id,
-                    d.get("_id"),
-                    shed_id,
-                )
-
+        hero_url = await resolve_hero_url(hero_id)
         out.append(bike_doc_to_out(d, hero_url=hero_url))
 
     return out
-
 
 # ---------- NEW: delete shed ----------
 
