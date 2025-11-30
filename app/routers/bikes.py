@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from bson import ObjectId
 
-# from app.db import bikes_col, media_items_col
+from app.db import bikes_col#, media_items_col
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url

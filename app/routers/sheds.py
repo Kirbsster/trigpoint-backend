@@ -8,10 +8,10 @@ from bson import ObjectId
 
 import logging
 
-from app.db import sheds_col, bikes_col, media_items_col
+from app.db import sheds_col, bikes_col#, media_items_col
 from app.routers.auth import get_current_user
 from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
-from app.storage import generate_signed_url
+# from app.storage import generate_signed_url
 from app.utils_media import resolve_hero_url
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
