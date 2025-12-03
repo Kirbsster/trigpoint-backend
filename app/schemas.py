@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, constr
-from typing import Literal, Optional, List
+from pydantic import BaseModel, EmailStr, constr, Field
+from typing import List, Optional
 
 
 # Auth payloads
@@ -42,23 +42,19 @@ class RegisterOut(UserOut):
     verify_token_dev_only: Optional[str] = None
     verify_link_dev_only: Optional[str] = None
 
-
-PointType = Literal[
-    "frame",
-    "free",
-    "fixed",
-    "shock",
-    "front_axle",
-    "rear_axle",
-]
-
 class BikePoint(BaseModel):
     id: str
-    type: PointType
-    name: Optional[str] = None
+    type: str
     x: float
     y: float
+    name: Optional[str] = None
 
+class RigidBody(BaseModel):
+    id: str
+    name: Optional[str] = None
+    point_ids: List[str] = Field(default_factory=list)
+    closed: bool = False  # for loops (probably False for linkages)
 
 class BikePointsUpdate(BaseModel):
-    points: List[BikePoint]
+    points: List[BikePoint] = Field(default_factory=list)
+    bodies: List[RigidBody] = Field(default_factory=list)
