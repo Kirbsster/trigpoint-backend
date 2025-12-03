@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from bson import ObjectId
-from app.schemas.bike_points import BikePoint, BikePointsUpdate
+from app.schemas import BikePoint, BikePointsUpdate
 
 from app.db import bikes_col#, media_items_col
 # from app.storage import generate_signed_url

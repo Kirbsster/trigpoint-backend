@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, constr
-from typing import Optional
+from typing import Literal, Optional, List
+
 
 # Auth payloads
 class TokenPair(BaseModel):
@@ -40,3 +41,24 @@ class ChangePasswordIn(BaseModel):
 class RegisterOut(UserOut):
     verify_token_dev_only: Optional[str] = None
     verify_link_dev_only: Optional[str] = None
+
+
+PointType = Literal[
+    "frame",
+    "free",
+    "fixed",
+    "shock",
+    "front_axle",
+    "rear_axle",
+]
+
+class BikePoint(BaseModel):
+    id: str
+    type: PointType
+    name: Optional[str] = None
+    x: float
+    y: float
+
+
+class BikePointsUpdate(BaseModel):
+    points: List[BikePoint]
