@@ -146,69 +146,37 @@ async def get_bike(
 
     return bike_doc_to_out(doc, hero_url=hero_url)
 
-# @router.put("/{bike_id}/points", response_model=BikeOut)
-# async def update_bike_points(
-#     bike_id: str,
-#     payload: BikePointsUpdate,
-#     current_user=Depends(get_current_user),
-# ):
-#     """Update the annotated geometry points for a bike."""
-#     user_oid = _extract_user_oid(current_user)
-#     try:
-#         oid = ObjectId(bike_id)
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Invalid bike_id")
-
-#     bikes = bikes_col()
-#     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
-#     if not doc:
-#         raise HTTPException(status_code=404, detail="Bike not found")
-
-#     now = datetime.utcnow()
-
-#     await bikes.update_one(
-#         {"_id": oid, "user_id": user_oid},
-#         {
-#             "$set": {
-#                 "points": [p.dict() for p in payload.points],
-#                 "updated_at": now,
-#             }
-#         },
-#     )
-
-#     updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
-#     hero_id = updated.get("hero_media_id")
-#     hero_url = await resolve_hero_url(hero_id)
-#     return bike_doc_to_out(updated, hero_url=hero_url)
-@router.put("/{bike_id}/points", status_code=200)
+@router.put("/{bike_id}/points", response_model=BikeOut)
 async def update_bike_points(
     bike_id: str,
     payload: BikePointsUpdate,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
+    """Update the annotated geometry points for a bike."""
     user_oid = _extract_user_oid(current_user)
-
     try:
         oid = ObjectId(bike_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    # ensure bike belongs to user
     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
-    # persist both points + bodies on the doc
+    now = datetime.utcnow()
+
     await bikes.update_one(
-        {"_id": oid},
+        {"_id": oid, "user_id": user_oid},
         {
             "$set": {
-                "points": [p.model_dict() for p in payload.points],
-                "bodies": [b.model_dict() for b in payload.bodies],
-                "updated_at": datetime.utcnow(),
+                "points": [p.dict() for p in payload.points],
+                "updated_at": now,
             }
         },
     )
 
-    return {"ok": True}
+    updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    hero_id = updated.get("hero_media_id")
+    hero_url = await resolve_hero_url(hero_id)
+    return bike_doc_to_out(updated, hero_url=hero_url)
