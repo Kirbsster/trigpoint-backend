@@ -58,3 +58,10 @@ class RigidBody(BaseModel):
 class BikePointsUpdate(BaseModel):
     points: List[BikePoint] = Field(default_factory=list)
     bodies: List[RigidBody] = Field(default_factory=list)
+
+class BikeBodiesOut(BaseModel):
+    bodies: List[RigidBody] = Field(default_factory=list)
+
+
+class BikeBodiesUpdate(BaseModel):
+    bodies: List[RigidBody] = Field(default_factory=list)

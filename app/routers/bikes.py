@@ -6,7 +6,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from bson import ObjectId
-from app.schemas import BikePoint, BikePointsUpdate
+from app.schemas import (
+    BikePoint,
+    BikePointsUpdate,
+    RigidBody,
+    BikeBodiesOut,
+    BikeBodiesUpdate,
+)
 
 from app.db import bikes_col#, media_items_col
 # from app.storage import generate_signed_url
@@ -32,7 +38,8 @@ class BikeOut(BaseModel):
     updated_at: datetime
     hero_media_id: Optional[str] = None
     hero_url: Optional[str] = None
-    points: Optional[List[BikePoint]] = None   # 👈 NEW
+    points: Optional[List[BikePoint]] = None
+    bodies: Optional[List[RigidBody]] = None
 
 
 def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
@@ -44,7 +51,15 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
             points.append(BikePoint(**p))
         except Exception as exc:
             logging.warning("Skipping invalid point on bike %s: %r (%s)", doc.get("_id"), p, exc)
-
+    
+    raw_bodies = doc.get("bodies") or []
+    bodies: list[RigidBody] = []
+    for b in raw_bodies:
+        try:
+            bodies.append(RigidBody(**b))
+        except Exception:
+            continue
+    
     return BikeOut(
         id=str(doc["_id"]),
         name=doc["name"],
@@ -58,7 +73,9 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
         # prefer the explicit hero_url passed in, fall back to any stored value
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
         points=points or None,
+        bodies=bodies or None,
     )
+
 
 def _extract_user_oid(current_user) -> ObjectId:
     """Helper to robustly extract a Mongo ObjectId for the current user."""
@@ -180,3 +197,77 @@ async def update_bike_points(
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     return bike_doc_to_out(updated, hero_url=hero_url)
+
+
+@router.get("/{bike_id}/bodies", response_model=BikeBodiesOut)
+async def get_bodies(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    Return all rigid bodies for a given bike.
+
+    Data is stored inside the bike document as doc["bodies"] = [...]
+    but exposed via its own endpoint so we don't touch the points logic.
+    """
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    doc = await bikes.find_one(
+        {"_id": oid, "user_id": user_oid},
+        {"bodies": 1, "_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    raw_bodies = doc.get("bodies") or []
+    bodies: List[RigidBody] = []
+    for b in raw_bodies:
+        try:
+            bodies.append(RigidBody(**b))
+        except Exception:
+            # Skip malformed entries rather than crashing older docs
+            continue
+
+    return BikeBodiesOut(bodies=bodies)
+
+
+@router.put("/{bike_id}/bodies", response_model=BikeBodiesOut, status_code=status.HTTP_200_OK)
+async def update_bodies(
+    bike_id: str,
+    payload: BikeBodiesUpdate,
+    current_user=Depends(get_current_user),
+):
+    """
+    Replace the bodies list for this bike.
+
+    This DOES NOT touch points or anything else on the bike document.
+    """
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+
+    result = await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {
+            "$set": {
+                "bodies": [b.dict() for b in payload.bodies],
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    # Echo back what we just stored
+    return BikeBodiesOut(bodies=payload.bodies)
