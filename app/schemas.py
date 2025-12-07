@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, EmailStr, constr, Field
 from typing import List, Optional
 
@@ -42,6 +44,11 @@ class RegisterOut(UserOut):
     verify_token_dev_only: Optional[str] = None
     verify_link_dev_only: Optional[str] = None
 
+class BikeCreate(BaseModel):
+    name: str
+    brand: str
+    model_year: Optional[int] = None
+
 class BikePoint(BaseModel):
     id: str
     type: str
@@ -55,6 +62,24 @@ class RigidBody(BaseModel):
     point_ids: List[str] = Field(default_factory=list)
     closed: bool = False  # for loops (probably False for linkages)
 
+class BikeGeometry(BaseModel):
+    rear_center_mm: float | None = None
+    scale_mm_per_px: float | None = None  # or px_per_mm if you prefer
+
+class BikeOut(BaseModel):
+    id: str
+    name: str
+    brand: str
+    model_year: Optional[int] = None
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+    hero_media_id: Optional[str] = None
+    hero_url: Optional[str] = None
+    points: Optional[List[BikePoint]] = None
+    bodies: Optional[List[RigidBody]] = None
+    geometry: BikeGeometry | None = None
+
 class BikePointsUpdate(BaseModel):
     points: List[BikePoint] = Field(default_factory=list)
     bodies: List[RigidBody] = Field(default_factory=list)
@@ -62,6 +87,8 @@ class BikePointsUpdate(BaseModel):
 class BikeBodiesOut(BaseModel):
     bodies: List[RigidBody] = Field(default_factory=list)
 
-
 class BikeBodiesUpdate(BaseModel):
     bodies: List[RigidBody] = Field(default_factory=list)
+
+class RearCenterUpdate(BaseModel):
+    rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
