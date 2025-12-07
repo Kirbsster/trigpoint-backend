@@ -16,6 +16,7 @@ from app.schemas import (
     BikeBodiesUpdate,
     RearCenterUpdate,
     BikeOut,
+    BikeGeometry,
 )
 
 from app.db import bikes_col#, media_items_col
@@ -42,7 +43,19 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
             bodies.append(RigidBody(**b))
         except Exception:
             continue
-    
+
+    # 👇 NEW: geometry block
+    geometry_raw = doc.get("geometry") or {}
+    geometry: Optional[BikeGeometry] = None
+    if geometry_raw:
+        try:
+            geometry = BikeGeometry(**geometry_raw)
+        except Exception as exc:
+            logging.warning(
+                "Skipping invalid geometry on bike %s: %r (%s)",
+                doc.get("_id"), geometry_raw, exc
+            )
+
     return BikeOut(
         id=str(doc["_id"]),
         name=doc["name"],
@@ -57,6 +70,7 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
         points=points or None,
         bodies=bodies or None,
+        geometry=geometry,
     )
 
 
