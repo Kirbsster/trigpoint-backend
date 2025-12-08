@@ -60,6 +60,7 @@ class RigidBody(BaseModel):
     id: str
     name: Optional[str] = None
     point_ids: List[str] = Field(default_factory=list)
+    type: Optional[str] = None
     closed: bool = False  # for loops (probably False for linkages)
 
 class BikeGeometry(BaseModel):
