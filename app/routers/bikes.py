@@ -18,6 +18,7 @@ from app.schemas import (
     BikeOut,
     BikeGeometry,
 )
+from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
 from app.db import bikes_col#, media_items_col
 # from app.storage import generate_signed_url
@@ -345,3 +346,62 @@ async def update_rear_center(
     hero_url = await resolve_hero_url(hero_id)
 
     return bike_doc_to_out(updated, hero_url=hero_url)
+
+
+@router.get("/{bike_id}/kinematics", response_model=SolverResult)
+async def compute_bike_kinematics(
+    bike_id: str,
+    steps: int = 80,
+    iterations: int = 100,
+    current_user=Depends(get_current_user),
+):
+    """
+    Run the 2D linkage solver for this bike.
+
+    - Uses the stored BikePoint + RigidBody definitions.
+    - Assumes exactly one RigidBody has type="shock" with length0 + stroke.
+    - Returns kinematics vs shock stroke (positions, rear travel, leverage).
+    """
+    user_oid = _extract_user_oid(current_user)
+
+    # Parse bike_id → ObjectId
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    # Extract / validate points
+    raw_points = doc.get("points") or []
+    points: List[BikePoint] = []
+    for p in raw_points:
+        try:
+            points.append(BikePoint(**p))
+        except Exception as exc:
+            logging.warning("Skipping invalid point on bike %s: %r (%s)", doc.get("_id"), p, exc)
+    if not points:
+        raise HTTPException(status_code=400, detail="Bike has no valid points defined")
+
+    # Extract / validate bodies
+    raw_bodies = doc.get("bodies") or []
+    bodies: List[RigidBody] = []
+    for b in raw_bodies:
+        try:
+            bodies.append(RigidBody(**b))
+        except Exception as exc:
+            logging.warning("Skipping invalid body on bike %s: %r (%s)", doc.get("_id"), b, exc)
+    if not bodies:
+        raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
+
+    # Run the solver
+    try:
+        result = solve_bike_linkage(points=points, bodies=bodies, n_steps=steps, iterations=iterations)
+    except ValueError as exc:
+        # e.g. no shock body, multiple shocks, unknown point ids, etc.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return result
