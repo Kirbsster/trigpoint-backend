@@ -56,13 +56,23 @@ class BikePoint(BaseModel):
     y: float
     name: Optional[str] = None
 
+# class RigidBody(BaseModel):
+#     id: str
+#     name: Optional[str] = None
+#     point_ids: List[str] = Field(default_factory=list)
+#     type: Optional[str] = None
+#     closed: bool = False  # for loops (probably False for linkages)
 class RigidBody(BaseModel):
     id: str
     name: Optional[str] = None
     point_ids: List[str] = Field(default_factory=list)
-    type: Optional[str] = None
-    closed: bool = False  # for loops (probably False for linkages)
+    type: Optional[str] = None          # "bar" | "shock" | ...
+    closed: bool = False                # for loops (probably False for linkages)
 
+    # NEW: shock-specific geometry (optional for non-shock bodies)
+    length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
+    stroke: Optional[float] = None      # total shock stroke [same units as length0]
+    
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
     scale_mm_per_px: float | None = None  # or px_per_mm if you prefer
@@ -94,3 +104,5 @@ class BikeBodiesUpdate(BaseModel):
 class RearCenterUpdate(BaseModel):
     rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
     
+
+
