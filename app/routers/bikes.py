@@ -17,6 +17,7 @@ from app.schemas import (
     RearCenterUpdate,
     BikeOut,
     BikeGeometry,
+    BikeKinematics,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
@@ -57,6 +58,18 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
                 doc.get("_id"), geometry_raw, exc
             )
 
+    # 👇 NEW: kinematics block
+    kin_raw = doc.get("kinematics") or {}
+    kinematics: Optional[BikeKinematics] = None
+    if kin_raw:
+        try:
+            kinematics = BikeKinematics(**kin_raw)
+        except Exception as exc:
+            logging.warning(
+                "Skipping invalid kinematics on bike %s: %r (%s)",
+                doc.get("_id"), kin_raw, exc
+            )
+
     return BikeOut(
         id=str(doc["_id"]),
         name=doc["name"],
@@ -72,6 +85,7 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
         points=points or None,
         bodies=bodies or None,
         geometry=geometry,
+        kinematics=kinematics, 
     )
 
 
@@ -397,11 +411,46 @@ async def compute_bike_kinematics(
     if not bodies:
         raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
 
-    # Run the solver
+# Run the solver
     try:
         result = solve_bike_linkage(points=points, bodies=bodies, n_steps=steps, iterations=iterations)
     except ValueError as exc:
-        # e.g. no shock body, multiple shocks, unknown point ids, etc.
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # ---- Persist kinematics into the bike document ----
+    # Transform SolverResult → plain dict suitable for Mongo / BikeKinematics
+    kin_steps: list[dict] = []
+    for step in result.steps:
+        # step.points is a dict: point_id -> (x, y)
+        pts = [
+            {"point_id": pid, "x": xy[0], "y": xy[1]}
+            for pid, xy in step.points.items()
+        ]
+        kin_steps.append(
+            {
+                "step_index": step.step_index,
+                "shock_stroke": step.shock_stroke,
+                "shock_length": step.shock_length,
+                "rear_travel": step.rear_travel,
+                "leverage_ratio": step.leverage_ratio,
+                "points": pts,
+            }
+        )
+
+    kin_doc = {
+        "rear_axle_point_id": result.rear_axle_point_id,
+        "steps": kin_steps,
+    }
+
+    await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {
+            "$set": {
+                "kinematics": kin_doc,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    # Still return the solver result to the frontend
     return result
