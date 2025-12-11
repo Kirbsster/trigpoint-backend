@@ -59,12 +59,19 @@ class BikeCreate(BaseModel):
     model_year: Optional[int] = None
 
 
+class PointCoord(BaseModel):
+    """Position of a point at one kinematics step (index is implicit)."""
+    x: float
+    y: float
+
+
 class BikePoint(BaseModel):
     id: str
     type: str
     x: float
     y: float
     name: Optional[str] = None
+    coords: List[PointCoord] = Field(default_factory=list)
 
 
 class RigidBody(BaseModel):
@@ -113,12 +120,14 @@ class KinematicsStep(BaseModel):
     shock_length: float
     rear_travel: Optional[float] = None
     leverage_ratio: Optional[float] = None
-    points: List[KinematicsPoint] = Field(default_factory=list)
 
 
 class BikeKinematics(BaseModel):
     rear_axle_point_id: Optional[str] = None
+    n_steps: int = 0
+    driver_stroke: Optional[float] = None
     steps: List[KinematicsStep] = Field(default_factory=list)
+
 
 class BikeOut(BaseModel):
     id: str
