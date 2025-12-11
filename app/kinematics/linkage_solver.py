@@ -1,5 +1,4 @@
 # app/kinematics/linkage_solver.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,10 +7,11 @@ from typing import List, Optional, Dict, Tuple
 import math
 from pydantic import BaseModel
 
-from app.schemas import BikePoint, RigidBody   # reuse your existing models
+from app.schemas import BikePoint, RigidBody  # reuse your existing models
 
 
 # ------------ Internal edge representation ------------
+
 
 @dataclass
 class LinkEdge:
@@ -23,14 +23,15 @@ class LinkEdge:
 
 # ------------ Public solver output models ------------
 
+
 class SolverStep(BaseModel):
     """
     State of the linkage at one shock-stroke step.
     """
     step_index: int
-    shock_stroke: float            # "units" of shock stroke at this step (usually mm)
-    shock_length: float            # eye-to-eye at this step (same units)
-    rear_travel: Optional[float]   # vertical rear axle travel vs initial (same units)
+    shock_stroke: float            # shock stroke at this step (same units as driver_stroke)
+    shock_length: float            # eye-to-eye at this step (same units as points)
+    rear_travel: Optional[float]   # vertical rear axle travel vs initial (same units as points)
     leverage_ratio: Optional[float]  # d(rear_travel)/d(shock_stroke)
     points: Dict[str, Tuple[float, float]]  # point.id -> (x, y)
 
@@ -41,9 +42,12 @@ class SolverResult(BaseModel):
     """
     steps: List[SolverStep]
     rear_axle_point_id: Optional[str]
+    # Optional debug payload for the frontend
+    debug: Optional[Dict[str, object]] = None
 
 
 # ------------ Converter: BikePoint + RigidBody → edges + flags ------------
+
 
 def _build_internal_model(
     points: List[BikePoint],
@@ -58,7 +62,6 @@ def _build_internal_model(
 ]:
     """
     Convert your domain objects into an internal form for the solver:
-
     - edges: list of LinkEdge (bars + shock)
     - fixed: list of booleans for each point (locked vs free)
     - rear_axle_idx: optional index of rear axle point
@@ -121,17 +124,17 @@ def _build_internal_model(
 
             if body.type == "shock":
                 # Shock body → this segment is the driver shock
-                L0 = body.length0 if body.length0 is not None else L0_geom
-                if body.stroke is None:
+                L0 = body.length0 if getattr(body, "length0", None) is not None else L0_geom
+                stroke_val = getattr(body, "stroke", None)
+                if stroke_val is None:
                     raise ValueError(f"Shock body {body.id!r} must define 'stroke'.")
                 edge = LinkEdge(ia=ia, ib=ib, L0=L0, is_shock=True)
                 edges.append(edge)
-
                 if driver_edge_idx is not None:
                     raise ValueError("Multiple shock bodies found; only one driver is supported.")
                 driver_edge_idx = len(edges) - 1
                 driver_L0 = L0
-                driver_stroke = body.stroke
+                driver_stroke = float(stroke_val)
             else:
                 # Normal bar (moving) or fixed body segment
                 edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
@@ -143,6 +146,7 @@ def _build_internal_model(
 
 
 # ------------ Core PBD solver ------------
+
 
 def _solve_with_edges(
     points: List[BikePoint],
@@ -157,9 +161,8 @@ def _solve_with_edges(
 ) -> SolverResult:
     """
     Position-based distance-constraint solver for the linkage.
-
     - Treats each edge as a distance constraint.
-    - For the driver shock edge, target length = L0 - stroke_fraction.
+    - For the driver shock edge, target length = L0 - shock_stroke.
     """
     n = len(points)
     x = [p.x for p in points]
@@ -169,7 +172,6 @@ def _solve_with_edges(
     rear_y0 = y[rear_axle_idx] if rear_axle_idx is not None else None
 
     steps: List[SolverStep] = []
-
     n_steps = max(1, n_steps)
     iterations = max(1, iterations)
 
@@ -216,7 +218,6 @@ def _solve_with_edges(
                     y[ib] -= dy * diff * half
 
         # --- Record this step ---
-
         # Rear axle travel (vertical, positive "up" from initial)
         rear_travel: Optional[float] = None
         if rear_axle_idx is not None and rear_y0 is not None:
@@ -252,10 +253,32 @@ def _solve_with_edges(
         )
 
     rear_axle_id = points[rear_axle_idx].id if rear_axle_idx is not None else None
-    return SolverResult(steps=steps, rear_axle_point_id=rear_axle_id)
+
+    # --- Debug payload for the frontend ---
+    debug_data: Dict[str, object] = {
+        "edges": [
+            {
+                "ia": e.ia,
+                "ib": e.ib,
+                "L0": e.L0,
+                "is_shock": e.is_shock,
+                "a_id": points[e.ia].id,
+                "b_id": points[e.ib].id,
+            }
+            for e in edges
+        ],
+        "fixed_point_ids": [p.id for i, p in enumerate(points) if fixed[i]],
+        "rear_axle_point_id": rear_axle_id,
+        "driver_edge_index": driver_edge_idx,
+        "driver_L0": driver_L0,
+        "driver_stroke": driver_stroke,
+    }
+
+    return SolverResult(steps=steps, rear_axle_point_id=rear_axle_id, debug=debug_data)
 
 
 # ------------ Public API ------------
+
 
 def solve_bike_linkage(
     points: List[BikePoint],
@@ -268,10 +291,9 @@ def solve_bike_linkage(
 
     Expects:
       - BikePoint.type ∈ {"bb","rear_axle","front_axle","free","fixed"}
-      - Exactly one RigidBody with type="shock", with 2 point_ids and stroke set.
-
-    Returns:
-      SolverResult with positions, rear_travel, leverage vs shock stroke.
+      - Exactly one RigidBody with type="shock", with >=2 point_ids and stroke set.
+      - RigidBody.length0 and RigidBody.stroke in the same units as point coords,
+        or at least in a consistent arbitrary unit system.
     """
     (
         edges,
