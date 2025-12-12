@@ -18,7 +18,6 @@ from app.schemas import (
     BikeOut,
     BikeGeometry,
     BikeKinematics,
-    BikeKinematicsOut,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
@@ -179,7 +178,15 @@ async def get_bike(
 
     return bike_doc_to_out(doc, hero_url=hero_url)
 
-
+def _ensure_unique_point_ids(points: list[BikePoint]) -> None:
+    ids = [p.id for p in points if p.id]
+    dupes = {i for i in ids if ids.count(i) > 1}
+    if dupes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Duplicate point ids: {sorted(dupes)}",
+        )
+    
 @router.put("/{bike_id}/points", response_model=BikeOut)
 async def update_bike_points(
     bike_id: str,
@@ -188,6 +195,9 @@ async def update_bike_points(
 ):
     """Update the annotated geometry points for a bike."""
     user_oid = _extract_user_oid(current_user)
+
+    _ensure_unique_point_ids(payload.points)
+
     try:
         oid = ObjectId(bike_id)
     except Exception:
@@ -253,7 +263,15 @@ async def get_bodies(
 
     return BikeBodiesOut(bodies=bodies)
 
-
+def _ensure_unique_body_ids(bodies):
+    ids = [b.id for b in bodies if b.id]
+    dupes = {i for i in ids if ids.count(i) > 1}
+    if dupes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Duplicate body ids: {sorted(dupes)}",
+        )
+    
 @router.put("/{bike_id}/bodies", response_model=BikeBodiesOut, status_code=status.HTTP_200_OK)
 async def update_bodies(
     bike_id: str,
@@ -266,6 +284,8 @@ async def update_bodies(
     This DOES NOT touch points or anything else on the bike document.
     """
     user_oid = _extract_user_oid(current_user)
+
+    _ensure_unique_body_ids(payload.bodies)
 
     try:
         oid = ObjectId(bike_id)
@@ -811,7 +831,7 @@ async def compute_bike_kinematics(
     return result
 
 
-@router.get("/{bike_id}/kinematics_cached", response_model=BikeKinematicsOut)
+@router.get("/{bike_id}/kinematics_cached", response_model=BikeKinematics)
 async def get_cached_bike_kinematics(
     bike_id: str,
     current_user=Depends(get_current_user),
@@ -846,7 +866,7 @@ async def get_cached_bike_kinematics(
         )
 
     # Normalize a bit so the frontend always gets predictable fields
-    return BikeKinematicsOut(
+    return BikeKinematics(
         rear_axle_point_id=kin.get("rear_axle_point_id"),
         n_steps=kin.get("n_steps") or (len(kin.get("steps") or [])),
         driver_stroke=kin.get("driver_stroke"),
