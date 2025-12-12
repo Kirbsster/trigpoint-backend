@@ -97,53 +97,119 @@ def _build_internal_model(
     driver_L0: Optional[float] = None
     driver_stroke: Optional[float] = None
 
+    # for body in bodies:
+    #     pids = body.point_ids or []
+    #     if len(pids) < 2:
+    #         continue
+
+    #     # Mark frame clusters as fixed (extra safety)
+    #     if body.type == "fixed":
+    #         for pid in pids:
+    #             if pid not in idx:
+    #                 raise ValueError(f"RigidBody {body.id!r} references unknown point {pid!r}.")
+    #             fixed[idx[pid]] = True
+
+    #     # Build segments (start/end) from ordered point_ids
+    #     seg_pairs: List[Tuple[str, str]] = list(zip(pids, pids[1:]))
+    #     if body.closed and len(pids) > 2:
+    #         seg_pairs.append((pids[-1], pids[0]))
+
+    #     for a_id, b_id in seg_pairs:
+    #         if a_id not in idx or b_id not in idx:
+    #             raise ValueError(f"RigidBody {body.id!r} references unknown point.")
+    #         ia, ib = idx[a_id], idx[b_id]
+    #         dx = x0[ib] - x0[ia]
+    #         dy = y0[ib] - y0[ia]
+    #         L0_geom = math.hypot(dx, dy)
+
+    #         if body.type == "shock":
+    #             # Shock body → this segment is the driver shock
+    #             L0 = body.length0 if getattr(body, "length0", None) is not None else L0_geom
+    #             stroke_val = getattr(body, "stroke", None)
+    #             if stroke_val is None:
+    #                 raise ValueError(f"Shock body {body.id!r} must define 'stroke'.")
+    #             edge = LinkEdge(ia=ia, ib=ib, L0=L0, is_shock=True)
+    #             edges.append(edge)
+    #             if driver_edge_idx is not None:
+    #                 raise ValueError("Multiple shock bodies found; only one driver is supported.")
+    #             driver_edge_idx = len(edges) - 1
+    #             driver_L0 = L0
+    #             driver_stroke = float(stroke_val)
+    #         else:
+    #             # Normal bar (moving) or fixed body segment
+    #             edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
     for body in bodies:
         pids = body.point_ids or []
         if len(pids) < 2:
             continue
 
-        # Mark frame clusters as fixed (extra safety)
+        # Fixed body: lock all its points
         if body.type == "fixed":
             for pid in pids:
                 if pid not in idx:
                     raise ValueError(f"RigidBody {body.id!r} references unknown point {pid!r}.")
                 fixed[idx[pid]] = True
 
-        # Build segments (start/end) from ordered point_ids
-        seg_pairs: List[Tuple[str, str]] = list(zip(pids, pids[1:]))
-        if body.closed and len(pids) > 2:
-            seg_pairs.append((pids[-1], pids[0]))
+        # Shock: exactly one edge (driver)
+        if body.type == "shock":
+            if len(pids) != 2:
+                raise ValueError(f"Shock body {body.id!r} must have exactly 2 point_ids.")
+            a_id, b_id = pids
+            if a_id not in idx or b_id not in idx:
+                raise ValueError(f"Shock body {body.id!r} references unknown point.")
+            ia, ib = idx[a_id], idx[b_id]
+            dx = x0[ib] - x0[ia]
+            dy = y0[ib] - y0[ia]
+            L0_geom = math.hypot(dx, dy)
+            L0 = body.length0 if getattr(body, "length0", None) is not None else L0_geom
+            if getattr(body, "stroke", None) is None:
+                raise ValueError(f"Shock body {body.id!r} must define 'stroke'.")
+            edges.append(LinkEdge(ia=ia, ib=ib, L0=L0, is_shock=True))
+            if driver_edge_idx is not None:
+                raise ValueError("Multiple shock bodies found; only one driver is supported.")
+            driver_edge_idx = len(edges) - 1
+            driver_L0 = L0
+            driver_stroke = body.stroke
+            continue
 
-        for a_id, b_id in seg_pairs:
+        # Non-shock bodies: rigidify with hidden diagonals (solver-only)
+        for a_id, b_id in _rigid_pairs(pids, closed=bool(body.closed)):
             if a_id not in idx or b_id not in idx:
                 raise ValueError(f"RigidBody {body.id!r} references unknown point.")
             ia, ib = idx[a_id], idx[b_id]
             dx = x0[ib] - x0[ia]
             dy = y0[ib] - y0[ia]
             L0_geom = math.hypot(dx, dy)
-
-            if body.type == "shock":
-                # Shock body → this segment is the driver shock
-                L0 = body.length0 if getattr(body, "length0", None) is not None else L0_geom
-                stroke_val = getattr(body, "stroke", None)
-                if stroke_val is None:
-                    raise ValueError(f"Shock body {body.id!r} must define 'stroke'.")
-                edge = LinkEdge(ia=ia, ib=ib, L0=L0, is_shock=True)
-                edges.append(edge)
-                if driver_edge_idx is not None:
-                    raise ValueError("Multiple shock bodies found; only one driver is supported.")
-                driver_edge_idx = len(edges) - 1
-                driver_L0 = L0
-                driver_stroke = float(stroke_val)
-            else:
-                # Normal bar (moving) or fixed body segment
-                edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
+            edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
 
     if driver_edge_idx is None or driver_L0 is None or driver_stroke is None:
         raise ValueError("No shock body found; need exactly one RigidBody with type='shock'.")
 
     return edges, fixed, rear_axle_idx, driver_edge_idx, driver_L0, driver_stroke
 
+
+def _rigid_pairs(point_ids: list[str], closed: bool) -> list[tuple[str, str]]:
+    """Return constraint pairs that make a k-point body rigid in 2D (fan triangulation)."""
+    pids = [pid for pid in point_ids if pid]
+    if len(pids) < 2:
+        return []
+
+    pairs: list[tuple[str, str]] = []
+
+    # Visible perimeter / chain edges (keep what user intended)
+    for a, b in zip(pids, pids[1:]):
+        pairs.append((a, b))
+    if closed and len(pids) > 2:
+        pairs.append((pids[-1], pids[0]))
+
+    # Hidden diagonals: fan from first point to all others from index 2+
+    # (p0-p2), (p0-p3), ... makes it rigid
+    if len(pids) >= 3:
+        p0 = pids[0]
+        for pid in pids[2:]:
+            pairs.append((p0, pid))
+
+    return pairs
 
 # ------------ Core PBD solver ------------
 

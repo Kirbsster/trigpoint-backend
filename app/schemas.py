@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, constr, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 # Auth payloads
@@ -80,8 +80,6 @@ class RigidBody(BaseModel):
     point_ids: List[str] = Field(default_factory=list)
     type: Optional[str] = None          # "bar" | "shock" | ...
     closed: bool = False                # for loops (probably False for linkages)
-
-    # NEW: shock-specific geometry (optional for non-shock bodies)
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
     
@@ -143,6 +141,7 @@ class BikeOut(BaseModel):
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None
     kinematics: Optional[BikeKinematics] = None
+
     
 
 

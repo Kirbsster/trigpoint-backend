@@ -18,6 +18,7 @@ from app.schemas import (
     BikeOut,
     BikeGeometry,
     BikeKinematics,
+    BikeKinematicsOut,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
@@ -808,3 +809,46 @@ async def compute_bike_kinematics(
     # Front-end gets the scaled result (mm stroke/travel, px coords)
     result.steps = solver_steps
     return result
+
+
+@router.get("/{bike_id}/kinematics_cached", response_model=BikeKinematicsOut)
+async def get_cached_bike_kinematics(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    Return cached kinematics from the bike document (no solver run).
+    This reads doc["kinematics"] written by /{bike_id}/kinematics.
+    """
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    doc = await bikes.find_one(
+        {"_id": oid, "user_id": user_oid},
+        {"kinematics": 1, "_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    kin = doc.get("kinematics")
+    if not kin:
+        # No cached run yet
+        return BikeKinematicsOut(
+            rear_axle_point_id=None,
+            n_steps=0,
+            driver_stroke=None,
+            steps=[],
+        )
+
+    # Normalize a bit so the frontend always gets predictable fields
+    return BikeKinematicsOut(
+        rear_axle_point_id=kin.get("rear_axle_point_id"),
+        n_steps=kin.get("n_steps") or (len(kin.get("steps") or [])),
+        driver_stroke=kin.get("driver_stroke"),
+        steps=kin.get("steps") or [],
+    )
