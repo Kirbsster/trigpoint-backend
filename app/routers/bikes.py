@@ -490,6 +490,152 @@ async def update_rear_center(
 
 #     # Front-end still gets the raw solver result
 #     return result
+# @router.get("/{bike_id}/kinematics", response_model=SolverResult)
+# async def compute_bike_kinematics(
+#     bike_id: str,
+#     steps: int = 80,
+#     iterations: int = 100,
+#     current_user=Depends(get_current_user),
+# ):
+#     """
+#     Run the 2D linkage solver for this bike.
+
+#     Side effects:
+#     - Writes `coords` onto each point in doc["points"] so that coords[i]
+#       matches kinematics step i.
+#     - Writes a compact `kinematics` summary (per-step stroke, travel, leverage).
+#     """
+#     user_oid = _extract_user_oid(current_user)
+
+#     # Parse bike_id → ObjectId
+#     try:
+#         oid = ObjectId(bike_id)
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+#     bikes = bikes_col()
+#     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+#     if not doc:
+#         raise HTTPException(status_code=404, detail="Bike not found")
+
+#     # ---- Extract / validate points ----
+#     raw_points = doc.get("points") or []
+#     points: List[BikePoint] = []
+#     for p in raw_points:
+#         try:
+#             points.append(BikePoint(**p))
+#         except Exception as exc:
+#             logging.warning(
+#                 "Skipping invalid point on bike %s: %r (%s)",
+#                 doc.get("_id"), p, exc
+#             )
+#     if not points:
+#         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
+
+#     # ---- Extract / validate bodies ----
+#     raw_bodies = doc.get("bodies") or []
+#     bodies: List[RigidBody] = []
+#     for b in raw_bodies:
+#         try:
+#             bodies.append(RigidBody(**b))
+#         except Exception as exc:
+#             logging.warning(
+#                 "Skipping invalid body on bike %s: %r (%s)",
+#                 doc.get("_id"), b, exc
+#             )
+#     if not bodies:
+#         raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
+
+#     # ---- Get scale_mm_per_px from geometry (needed to convert stroke mm → px) ----
+#     geom = doc.get("geometry") or {}
+#     scale_mm_per_px = float(geom.get("scale_mm_per_px"))
+#     if scale_mm_per_px is None or scale_mm_per_px <= 0:
+#         raise HTTPException(
+#             status_code=400,
+#             detail="Cannot run kinematics: rear_center / scale_mm_per_px not set.",
+#         )
+
+#     # ---- Convert shock stroke from mm → px for the solver ----
+#     bodies_for_solver: List[RigidBody] = []
+#     for b in bodies:
+#         if b.type == "shock" and b.stroke is not None:
+#             stroke_mm = float(b.stroke)
+#             stroke_px = stroke_mm / scale_mm_per_px
+#             # clone body with stroke in px
+#             b_px = b.copy(update={"stroke": stroke_px})
+#             bodies_for_solver.append(b_px)
+#         else:
+#             bodies_for_solver.append(b)
+
+#     # ---- Run solver ----
+#     try:
+#         result = solve_bike_linkage(
+#             points=points,
+#             bodies=bodies_for_solver,  # NOTE: stroke now in px
+#             n_steps=steps,
+#             iterations=iterations,
+#         )
+#     except ValueError as exc:
+#         raise HTTPException(status_code=400, detail=str(exc))
+
+#     # --------------------------------------------------------
+#     # 1) Build coords per point_id: coords[i] = (x,y) at step i
+#     # --------------------------------------------------------
+#     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
+#     coords_map: dict[str, list[dict]] = {}
+
+#     for step in solver_steps:
+#         for pid, (x, y) in step.points.items():
+#             coords_map.setdefault(pid, []).append({"x": float(x), "y": float(y)})
+
+#     # Rebuild points with coords attached
+#     new_points: list[dict] = []
+#     for p in raw_points:
+#         pid = p.get("id")
+#         if not pid:
+#             continue
+#         p_copy = dict(p)
+#         p_copy["coords"] = coords_map.get(pid, [])
+#         new_points.append(p_copy)
+
+#     # --------------------------------------------------------
+#     # 2) Build compact kinematics summary (no per-point data)
+#     # --------------------------------------------------------
+#     kin_steps: list[dict] = []
+#     for s in solver_steps:
+#         kin_steps.append(
+#             {
+#                 "step_index": s.step_index,
+#                 "shock_stroke": s.shock_stroke,
+#                 "shock_length": s.shock_length,
+#                 "rear_travel": s.rear_travel,
+#                 "leverage_ratio": s.leverage_ratio,
+#             }
+#         )
+
+#     kin_doc = {
+#         "rear_axle_point_id": result.rear_axle_point_id,
+#         "n_steps": len(solver_steps),
+#         "driver_stroke": solver_steps[-1].shock_stroke * scale_mm_per_px if solver_steps else None,
+#         "steps": kin_steps,
+#     }
+
+#     # --------------------------------------------------------
+#     # 3) Persist into Mongo
+#     # --------------------------------------------------------
+#     await bikes.update_one(
+#         {"_id": oid, "user_id": user_oid},
+#         {
+#             "$set": {
+#                 "points": new_points,
+#                 "kinematics": kin_doc,
+#                 "updated_at": datetime.utcnow(),
+#             }
+#         },
+#     )
+
+#     # Front-end still gets the raw solver result
+#     return result
 @router.get("/{bike_id}/kinematics", response_model=SolverResult)
 async def compute_bike_kinematics(
     bike_id: str,
@@ -502,8 +648,9 @@ async def compute_bike_kinematics(
 
     Side effects:
     - Writes `coords` onto each point in doc["points"] so that coords[i]
-      matches kinematics step i.
-    - Writes a compact `kinematics` summary (per-step stroke, travel, leverage).
+      matches kinematics step i (coords are in image pixels).
+    - Writes a compact `kinematics` summary (per-step stroke, travel, leverage),
+      all in mm.
     """
     user_oid = _extract_user_oid(current_user)
 
@@ -548,11 +695,23 @@ async def compute_bike_kinematics(
 
     # ---- Get scale_mm_per_px from geometry (needed to convert stroke mm → px) ----
     geom = doc.get("geometry") or {}
-    scale_mm_per_px = float(geom.get("scale_mm_per_px"))
-    if scale_mm_per_px is None or scale_mm_per_px <= 0:
+    raw_scale = geom.get("scale_mm_per_px")
+    if raw_scale is None:
         raise HTTPException(
             status_code=400,
             detail="Cannot run kinematics: rear_center / scale_mm_per_px not set.",
+        )
+    try:
+        scale_mm_per_px = float(raw_scale)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot run kinematics: invalid scale_mm_per_px in geometry.",
+        )
+    if scale_mm_per_px <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot run kinematics: scale_mm_per_px must be > 0.",
         )
 
     # ---- Convert shock stroke from mm → px for the solver ----
@@ -567,7 +726,7 @@ async def compute_bike_kinematics(
         else:
             bodies_for_solver.append(b)
 
-    # ---- Run solver ----
+    # ---- Run solver (all geometry in px) ----
     try:
         result = solve_bike_linkage(
             points=points,
@@ -579,16 +738,27 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=400, detail=str(exc))
 
     # --------------------------------------------------------
-    # 1) Build coords per point_id: coords[i] = (x,y) at step i
+    # 1) Scale stroke / length / travel to mm, keep coords in px
     # --------------------------------------------------------
     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
-    coords_map: dict[str, list[dict]] = {}
+    scale = scale_mm_per_px  # mm per px
 
+    for s in solver_steps:
+        # These came out of the solver in px
+        s.shock_stroke = s.shock_stroke * scale      # → mm
+        s.shock_length = s.shock_length * scale      # → mm
+        if s.rear_travel is not None:
+            s.rear_travel = s.rear_travel * scale    # → mm
+
+    # --------------------------------------------------------
+    # 2) Build coords per point_id: coords[i] = (x,y) at step i (STILL px)
+    # --------------------------------------------------------
+    coords_map: dict[str, list[dict]] = {}
     for step in solver_steps:
         for pid, (x, y) in step.points.items():
             coords_map.setdefault(pid, []).append({"x": float(x), "y": float(y)})
 
-    # Rebuild points with coords attached
+    # Rebuild points with coords attached (coords are image pixels)
     new_points: list[dict] = []
     for p in raw_points:
         pid = p.get("id")
@@ -599,29 +769,30 @@ async def compute_bike_kinematics(
         new_points.append(p_copy)
 
     # --------------------------------------------------------
-    # 2) Build compact kinematics summary (no per-point data)
+    # 3) Build compact kinematics summary (now in mm)
     # --------------------------------------------------------
     kin_steps: list[dict] = []
     for s in solver_steps:
         kin_steps.append(
             {
                 "step_index": s.step_index,
-                "shock_stroke": s.shock_stroke * scale_mm_per_px,
-                "shock_length": s.shock_length * scale_mm_per_px,
-                "rear_travel": s.rear_travel * scale_mm_per_px,
-                "leverage_ratio": s.leverage_ratio,
+                "shock_stroke": s.shock_stroke,      # mm
+                "shock_length": s.shock_length,      # mm
+                "rear_travel": s.rear_travel,        # mm
+                "leverage_ratio": s.leverage_ratio,  # dimensionless
             }
         )
 
     kin_doc = {
         "rear_axle_point_id": result.rear_axle_point_id,
         "n_steps": len(solver_steps),
-        "driver_stroke": solver_steps[-1].shock_stroke * scale_mm_per_px if solver_steps else None,
+        # Already in mm after scaling above
+        "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
         "steps": kin_steps,
     }
 
     # --------------------------------------------------------
-    # 3) Persist into Mongo
+    # 4) Persist into Mongo
     # --------------------------------------------------------
     await bikes.update_one(
         {"_id": oid, "user_id": user_oid},
@@ -634,5 +805,6 @@ async def compute_bike_kinematics(
         },
     )
 
-    # Front-end still gets the raw solver result
+    # Front-end gets the scaled result (mm stroke/travel, px coords)
+    result.steps = solver_steps
     return result
