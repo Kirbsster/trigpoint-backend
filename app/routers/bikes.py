@@ -548,7 +548,7 @@ async def compute_bike_kinematics(
 
     # ---- Get scale_mm_per_px from geometry (needed to convert stroke mm → px) ----
     geom = doc.get("geometry") or {}
-    scale_mm_per_px = geom.get("scale_mm_per_px")
+    scale_mm_per_px = float(geom.get("scale_mm_per_px"))
     if scale_mm_per_px is None or scale_mm_per_px <= 0:
         raise HTTPException(
             status_code=400,
@@ -560,7 +560,7 @@ async def compute_bike_kinematics(
     for b in bodies:
         if b.type == "shock" and b.stroke is not None:
             stroke_mm = float(b.stroke)
-            stroke_px = stroke_mm / float(scale_mm_per_px)
+            stroke_px = stroke_mm / scale_mm_per_px
             # clone body with stroke in px
             b_px = b.copy(update={"stroke": stroke_px})
             bodies_for_solver.append(b_px)
@@ -606,9 +606,9 @@ async def compute_bike_kinematics(
         kin_steps.append(
             {
                 "step_index": s.step_index,
-                "shock_stroke": s.shock_stroke,
-                "shock_length": s.shock_length,
-                "rear_travel": s.rear_travel,
+                "shock_stroke": s.shock_stroke * scale_mm_per_px,
+                "shock_length": s.shock_length * scale_mm_per_px,
+                "rear_travel": s.rear_travel * scale_mm_per_px,
                 "leverage_ratio": s.leverage_ratio,
             }
         )
@@ -616,7 +616,7 @@ async def compute_bike_kinematics(
     kin_doc = {
         "rear_axle_point_id": result.rear_axle_point_id,
         "n_steps": len(solver_steps),
-        "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
+        "driver_stroke": solver_steps[-1].shock_stroke * scale_mm_per_px if solver_steps else None,
         "steps": kin_steps,
     }
 
