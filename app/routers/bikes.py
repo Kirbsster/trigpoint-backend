@@ -624,36 +624,6 @@ async def delete_bike(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/media/temp", response_model=TempMediaOut)
-async def upload_temp_media(
-    file: UploadFile = File(...),
-    current_user=Depends(get_current_user),
-):
-    user_oid = _extract_user_oid(current_user)
-
-    media_id = ObjectId()
-
-    # save to storage (S3/GCS/local)
-    url = await save_temp_media(
-        user_id=user_oid,
-        media_id=media_id,
-        file=file,
-    )
-
-    await media_col().insert_one({
-        "_id": media_id,
-        "user_id": user_oid,
-        "status": "temp",
-        "url": url,
-        "created_at": datetime.utcnow(),
-    })
-
-    return {
-        "media_id": str(media_id),
-        "preview_url": url,
-    }
-
-
 @router.post("/bikes/{bike_id}/media/hero/from-temp")
 async def attach_temp_media(
     bike_id: str,
@@ -682,22 +652,3 @@ async def attach_temp_media(
         {"$set": {"status": "attached", "bike_id": oid}},
     )
 
-
-@router.delete("/media/temp/{media_id}")
-async def delete_temp_media(
-    media_id: str,
-    current_user=Depends(get_current_user),
-):
-    user_oid = _extract_user_oid(current_user)
-    oid = ObjectId(media_id)
-
-    media = await media_col().find_one({
-        "_id": oid,
-        "user_id": user_oid,
-        "status": "temp",
-    })
-    if not media:
-        return
-
-    await delete_from_storage(media["url"])
-    await media_col().delete_one({"_id": oid})
