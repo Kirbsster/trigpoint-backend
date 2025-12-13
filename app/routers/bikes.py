@@ -382,281 +382,6 @@ async def update_rear_center(
 
     return bike_doc_to_out(updated, hero_url=hero_url)
 
-# @router.get("/{bike_id}/kinematics", response_model=SolverResult)
-# async def compute_bike_kinematics(
-#     bike_id: str,
-#     steps: int = 80,
-#     iterations: int = 100,
-#     current_user=Depends(get_current_user),
-# ):
-#     """
-#     Run the 2D linkage solver for this bike.
-
-#     Side effects:
-#     - Writes `coords` onto each point in doc["points"] so that coords[i]
-#       matches kinematics step i.
-#     - Writes a compact `kinematics` summary (per-step stroke, travel, leverage).
-#     """
-#     user_oid = _extract_user_oid(current_user)
-
-#     # Parse bike_id → ObjectId
-#     try:
-#         oid = ObjectId(bike_id)
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Invalid bike_id")
-
-#     bikes = bikes_col()
-#     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
-#     if not doc:
-#         raise HTTPException(status_code=404, detail="Bike not found")
-
-#     # ---- Extract / validate points ----
-#     raw_points = doc.get("points") or []
-#     points: List[BikePoint] = []
-#     for p in raw_points:
-#         try:
-#             points.append(BikePoint(**p))
-#         except Exception as exc:
-#             logging.warning(
-#                 "Skipping invalid point on bike %s: %r (%s)",
-#                 doc.get("_id"), p, exc
-#             )
-#     if not points:
-#         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
-
-#     # ---- Extract / validate bodies ----
-#     raw_bodies = doc.get("bodies") or []
-#     bodies: List[RigidBody] = []
-#     for b in raw_bodies:
-#         try:
-#             bodies.append(RigidBody(**b))
-#         except Exception as exc:
-#             logging.warning(
-#                 "Skipping invalid body on bike %s: %r (%s)",
-#                 doc.get("_id"), b, exc
-#             )
-#     if not bodies:
-#         raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
-
-#     # ---- Run solver ----
-#     try:
-#         result = solve_bike_linkage(
-#             points=points,
-#             bodies=bodies,
-#             n_steps=steps,
-#             iterations=iterations,
-#         )
-#     except ValueError as exc:
-#         raise HTTPException(status_code=400, detail=str(exc))
-
-#     # --------------------------------------------------------
-#     # 1) Build coords per point_id: coords[i] = (x,y) at step i
-#     # --------------------------------------------------------
-#     # Ensure steps sorted by step_index just in case
-#     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
-#     coords_map: dict[str, list[dict]] = {}
-
-#     for step in solver_steps:
-#         for pid, (x, y) in step.points.items():
-#             coords_map.setdefault(pid, []).append(
-#                 {"x": float(x), "y": float(y)}
-#             )
-
-#     # Rebuild points with coords attached
-#     new_points: list[dict] = []
-#     for p in raw_points:
-#         pid = p.get("id")
-#         if not pid:
-#             continue
-#         p_copy = dict(p)
-#         # Overwrite coords with fresh run
-#         p_copy["coords"] = coords_map.get(pid, [])
-#         new_points.append(p_copy)
-
-#     # --------------------------------------------------------
-#     # 2) Build compact kinematics summary (no per-point data)
-#     # --------------------------------------------------------
-#     kin_steps: list[dict] = []
-#     for s in solver_steps:
-#         kin_steps.append(
-#             {
-#                 "step_index": s.step_index,
-#                 "shock_stroke": s.shock_stroke,
-#                 "shock_length": s.shock_length,
-#                 "rear_travel": s.rear_travel,
-#                 "leverage_ratio": s.leverage_ratio,
-#             }
-#         )
-
-#     kin_doc = {
-#         "rear_axle_point_id": result.rear_axle_point_id,
-#         "n_steps": len(solver_steps),
-#         "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
-#         "steps": kin_steps,
-#     }
-
-#     # --------------------------------------------------------
-#     # 3) Persist into Mongo
-#     # --------------------------------------------------------
-#     await bikes.update_one(
-#         {"_id": oid, "user_id": user_oid},
-#         {
-#             "$set": {
-#                 "points": new_points,
-#                 "kinematics": kin_doc,
-#                 "updated_at": datetime.utcnow(),
-#             }
-#         },
-#     )
-
-#     # Front-end still gets the raw solver result
-#     return result
-# @router.get("/{bike_id}/kinematics", response_model=SolverResult)
-# async def compute_bike_kinematics(
-#     bike_id: str,
-#     steps: int = 80,
-#     iterations: int = 100,
-#     current_user=Depends(get_current_user),
-# ):
-#     """
-#     Run the 2D linkage solver for this bike.
-
-#     Side effects:
-#     - Writes `coords` onto each point in doc["points"] so that coords[i]
-#       matches kinematics step i.
-#     - Writes a compact `kinematics` summary (per-step stroke, travel, leverage).
-#     """
-#     user_oid = _extract_user_oid(current_user)
-
-#     # Parse bike_id → ObjectId
-#     try:
-#         oid = ObjectId(bike_id)
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Invalid bike_id")
-
-#     bikes = bikes_col()
-#     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
-#     if not doc:
-#         raise HTTPException(status_code=404, detail="Bike not found")
-
-#     # ---- Extract / validate points ----
-#     raw_points = doc.get("points") or []
-#     points: List[BikePoint] = []
-#     for p in raw_points:
-#         try:
-#             points.append(BikePoint(**p))
-#         except Exception as exc:
-#             logging.warning(
-#                 "Skipping invalid point on bike %s: %r (%s)",
-#                 doc.get("_id"), p, exc
-#             )
-#     if not points:
-#         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
-
-#     # ---- Extract / validate bodies ----
-#     raw_bodies = doc.get("bodies") or []
-#     bodies: List[RigidBody] = []
-#     for b in raw_bodies:
-#         try:
-#             bodies.append(RigidBody(**b))
-#         except Exception as exc:
-#             logging.warning(
-#                 "Skipping invalid body on bike %s: %r (%s)",
-#                 doc.get("_id"), b, exc
-#             )
-#     if not bodies:
-#         raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
-
-#     # ---- Get scale_mm_per_px from geometry (needed to convert stroke mm → px) ----
-#     geom = doc.get("geometry") or {}
-#     scale_mm_per_px = float(geom.get("scale_mm_per_px"))
-#     if scale_mm_per_px is None or scale_mm_per_px <= 0:
-#         raise HTTPException(
-#             status_code=400,
-#             detail="Cannot run kinematics: rear_center / scale_mm_per_px not set.",
-#         )
-
-#     # ---- Convert shock stroke from mm → px for the solver ----
-#     bodies_for_solver: List[RigidBody] = []
-#     for b in bodies:
-#         if b.type == "shock" and b.stroke is not None:
-#             stroke_mm = float(b.stroke)
-#             stroke_px = stroke_mm / scale_mm_per_px
-#             # clone body with stroke in px
-#             b_px = b.copy(update={"stroke": stroke_px})
-#             bodies_for_solver.append(b_px)
-#         else:
-#             bodies_for_solver.append(b)
-
-#     # ---- Run solver ----
-#     try:
-#         result = solve_bike_linkage(
-#             points=points,
-#             bodies=bodies_for_solver,  # NOTE: stroke now in px
-#             n_steps=steps,
-#             iterations=iterations,
-#         )
-#     except ValueError as exc:
-#         raise HTTPException(status_code=400, detail=str(exc))
-
-#     # --------------------------------------------------------
-#     # 1) Build coords per point_id: coords[i] = (x,y) at step i
-#     # --------------------------------------------------------
-#     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
-#     coords_map: dict[str, list[dict]] = {}
-
-#     for step in solver_steps:
-#         for pid, (x, y) in step.points.items():
-#             coords_map.setdefault(pid, []).append({"x": float(x), "y": float(y)})
-
-#     # Rebuild points with coords attached
-#     new_points: list[dict] = []
-#     for p in raw_points:
-#         pid = p.get("id")
-#         if not pid:
-#             continue
-#         p_copy = dict(p)
-#         p_copy["coords"] = coords_map.get(pid, [])
-#         new_points.append(p_copy)
-
-#     # --------------------------------------------------------
-#     # 2) Build compact kinematics summary (no per-point data)
-#     # --------------------------------------------------------
-#     kin_steps: list[dict] = []
-#     for s in solver_steps:
-#         kin_steps.append(
-#             {
-#                 "step_index": s.step_index,
-#                 "shock_stroke": s.shock_stroke,
-#                 "shock_length": s.shock_length,
-#                 "rear_travel": s.rear_travel,
-#                 "leverage_ratio": s.leverage_ratio,
-#             }
-#         )
-
-#     kin_doc = {
-#         "rear_axle_point_id": result.rear_axle_point_id,
-#         "n_steps": len(solver_steps),
-#         "driver_stroke": solver_steps[-1].shock_stroke * scale_mm_per_px if solver_steps else None,
-#         "steps": kin_steps,
-#     }
-
-#     # --------------------------------------------------------
-#     # 3) Persist into Mongo
-#     # --------------------------------------------------------
-#     await bikes.update_one(
-#         {"_id": oid, "user_id": user_oid},
-#         {
-#             "$set": {
-#                 "points": new_points,
-#                 "kinematics": kin_doc,
-#                 "updated_at": datetime.utcnow(),
-#             }
-#         },
-#     )
-
-#     # Front-end still gets the raw solver result
-#     return result
 @router.get("/{bike_id}/kinematics", response_model=SolverResult)
 async def compute_bike_kinematics(
     bike_id: str,
@@ -897,3 +622,82 @@ async def delete_bike(
 
     await bikes.delete_one({"_id": oid, "user_id": user_oid})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/media/temp", response_model=TempMediaOut)
+async def upload_temp_media(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+
+    media_id = ObjectId()
+
+    # save to storage (S3/GCS/local)
+    url = await save_temp_media(
+        user_id=user_oid,
+        media_id=media_id,
+        file=file,
+    )
+
+    await media_col().insert_one({
+        "_id": media_id,
+        "user_id": user_oid,
+        "status": "temp",
+        "url": url,
+        "created_at": datetime.utcnow(),
+    })
+
+    return {
+        "media_id": str(media_id),
+        "preview_url": url,
+    }
+
+
+@router.post("/bikes/{bike_id}/media/hero/from-temp")
+async def attach_temp_media(
+    bike_id: str,
+    payload: AttachTempMedia,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    oid = ObjectId(bike_id)
+    media_oid = ObjectId(payload.media_id)
+
+    media = await media_col().find_one({
+        "_id": media_oid,
+        "user_id": user_oid,
+        "status": "temp",
+    })
+    if not media:
+        raise HTTPException(404, "Temp media not found")
+
+    await bikes_col().update_one(
+        {"_id": oid, "user_id": user_oid},
+        {"$set": {"hero_media_id": media_oid}},
+    )
+
+    await media_col().update_one(
+        {"_id": media_oid},
+        {"$set": {"status": "attached", "bike_id": oid}},
+    )
+
+
+@router.delete("/media/temp/{media_id}")
+async def delete_temp_media(
+    media_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    oid = ObjectId(media_id)
+
+    media = await media_col().find_one({
+        "_id": oid,
+        "user_id": user_oid,
+        "status": "temp",
+    })
+    if not media:
+        return
+
+    await delete_from_storage(media["url"])
+    await media_col().delete_one({"_id": oid})
