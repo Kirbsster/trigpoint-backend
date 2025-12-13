@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from pydantic import BaseModel
 from bson import ObjectId
 from app.schemas import (
@@ -872,3 +872,28 @@ async def get_cached_bike_kinematics(
         driver_stroke=kin.get("driver_stroke"),
         steps=kin.get("steps") or [],
     )
+
+
+@router.delete("/{bike_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_bike(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+
+    # Optional: fetch first if you want to delete media too
+    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    # TODO later: delete associated media (hero_media_id etc.) if desired.
+
+    await bikes.delete_one({"_id": oid, "user_id": user_oid})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
