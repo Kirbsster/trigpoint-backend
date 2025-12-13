@@ -622,33 +622,3 @@ async def delete_bike(
 
     await bikes.delete_one({"_id": oid, "user_id": user_oid})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post("/bikes/{bike_id}/media/hero/from-temp")
-async def attach_temp_media(
-    bike_id: str,
-    payload: AttachTempMedia,
-    current_user=Depends(get_current_user),
-):
-    user_oid = _extract_user_oid(current_user)
-    oid = ObjectId(bike_id)
-    media_oid = ObjectId(payload.media_id)
-
-    media = await media_col().find_one({
-        "_id": media_oid,
-        "user_id": user_oid,
-        "status": "temp",
-    })
-    if not media:
-        raise HTTPException(404, "Temp media not found")
-
-    await bikes_col().update_one(
-        {"_id": oid, "user_id": user_oid},
-        {"$set": {"hero_media_id": media_oid}},
-    )
-
-    await media_col().update_one(
-        {"_id": media_oid},
-        {"$set": {"status": "attached", "bike_id": oid}},
-    )
-
