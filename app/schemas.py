@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, constr, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Literal, Dict, Any
 
 
 # Auth payloads
@@ -82,11 +82,26 @@ class RigidBody(BaseModel):
     closed: bool = False                # for loops (probably False for linkages)
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
-    
+
+ScaleSource = Literal["rear_center", "wheelbase",]
 
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
-    scale_mm_per_px: float | None = None  # or px_per_mm if you prefer
+    wheelbase_mm: float | None = None
+    scale_mm_per_px: float | None = None
+    scale_source: ScaleSource | None = None  # which measurement set the scale
+
+
+class RearCenterUpdate(BaseModel):
+    rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
+
+
+class WheelbaseUpdate(BaseModel):
+    wheelbase_mm: float = Field(gt=0, description="Wheelbase in mm")
+
+
+class ScaleSourceUpdate(BaseModel):
+    scale_source: ScaleSource
 
 
 class BikePointsUpdate(BaseModel):
@@ -100,10 +115,6 @@ class BikeBodiesOut(BaseModel):
 
 class BikeBodiesUpdate(BaseModel):
     bodies: List[RigidBody] = Field(default_factory=list)
-
-
-class RearCenterUpdate(BaseModel):
-    rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
 
 
 class KinematicsPoint(BaseModel):

@@ -15,6 +15,8 @@ from app.schemas import (
     BikeBodiesOut,
     BikeBodiesUpdate,
     RearCenterUpdate,
+    ScaleSourceUpdate,
+    WheelbaseUpdate,
     BikeOut,
     BikeGeometry,
     BikeKinematics,
@@ -310,16 +312,87 @@ async def update_bodies(
     return BikeBodiesOut(bodies=payload.bodies)
 
 
+# @router.put("/{bike_id}/rear_center", response_model=BikeOut)
+# async def update_rear_center(
+#     bike_id: str,
+#     payload: RearCenterUpdate,
+#     current_user = Depends(get_current_user),
+# ):
+#     """Set rear-centre [mm] and compute/store a scale factor (mm per px)."""
+#     user_oid = _extract_user_oid(current_user)
+
+#     # Parse bike_id → ObjectId
+#     try:
+#         oid = ObjectId(bike_id)
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+#     bikes = bikes_col()
+
+#     # 1) Fetch bike for this user
+#     bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+#     if not bike:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND,
+#             detail="Bike not found",
+#         )
+
+#     points = bike.get("points", []) or []
+
+#     # 2) Find BB + rear axle points by type
+#     bb = next((p for p in points if p.get("type") in ("bb", "bottom_bracket")), None)
+#     rear_axle = next((p for p in points if p.get("type") == "rear_axle"), None)
+
+#     if not bb or not rear_axle:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Cannot compute scale: need BB and rear_axle points",
+#         )
+
+#     dx = rear_axle["x"] - bb["x"]
+#     dy = rear_axle["y"] - bb["y"]
+#     d_px = math.hypot(dx, dy)
+
+#     if d_px <= 0:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Cannot compute scale: BB and rear axle coincide",
+#         )
+
+#     rear_center_mm = float(payload.rear_center_mm)
+#     scale_mm_per_px = rear_center_mm / d_px
+
+#     # 3) Store in a 'geometry' block on the bike doc
+#     geometry = bike.get("geometry") or {}
+#     geometry["rear_center_mm"] = rear_center_mm
+#     geometry["scale_mm_per_px"] = scale_mm_per_px
+
+#     await bikes.update_one(
+#         {"_id": oid, "user_id": user_oid},
+#         {
+#             "$set": {
+#                 "geometry": geometry,
+#                 "updated_at": datetime.utcnow(),
+#             }
+#         },
+#     )
+
+#     # 4) Re-fetch + return via bike_doc_to_out, including hero_url
+#     updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+#     hero_id = updated.get("hero_media_id")
+#     hero_url = await resolve_hero_url(hero_id)
+
+#     return bike_doc_to_out(updated, hero_url=hero_url)
+
 @router.put("/{bike_id}/rear_center", response_model=BikeOut)
 async def update_rear_center(
     bike_id: str,
     payload: RearCenterUpdate,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
     """Set rear-centre [mm] and compute/store a scale factor (mm per px)."""
     user_oid = _extract_user_oid(current_user)
 
-    # Parse bike_id → ObjectId
     try:
         oid = ObjectId(bike_id)
     except Exception:
@@ -327,60 +400,133 @@ async def update_rear_center(
 
     bikes = bikes_col()
 
-    # 1) Fetch bike for this user
     bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
     if not bike:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Bike not found",
-        )
+        raise HTTPException(status_code=404, detail="Bike not found")
 
     points = bike.get("points", []) or []
-
-    # 2) Find BB + rear axle points by type
     bb = next((p for p in points if p.get("type") in ("bb", "bottom_bracket")), None)
     rear_axle = next((p for p in points if p.get("type") == "rear_axle"), None)
 
     if not bb or not rear_axle:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail="Cannot compute scale: need BB and rear_axle points",
         )
 
     dx = rear_axle["x"] - bb["x"]
     dy = rear_axle["y"] - bb["y"]
     d_px = math.hypot(dx, dy)
-
     if d_px <= 0:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail="Cannot compute scale: BB and rear axle coincide",
         )
 
     rear_center_mm = float(payload.rear_center_mm)
     scale_mm_per_px = rear_center_mm / d_px
 
-    # 3) Store in a 'geometry' block on the bike doc
-    geometry = bike.get("geometry") or {}
-    geometry["rear_center_mm"] = rear_center_mm
-    geometry["scale_mm_per_px"] = scale_mm_per_px
-
     await bikes.update_one(
         {"_id": oid, "user_id": user_oid},
-        {
-            "$set": {
-                "geometry": geometry,
-                "updated_at": datetime.utcnow(),
-            }
-        },
+        {"$set": {
+            "geometry.rear_center_mm": rear_center_mm,
+            "geometry.scale_mm_per_px": scale_mm_per_px,
+            "geometry.scale_source": "rear_center",
+            "updated_at": datetime.utcnow(),
+        }},
     )
 
-    # 4) Re-fetch + return via bike_doc_to_out, including hero_url
     updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
-
     return bike_doc_to_out(updated, hero_url=hero_url)
+
+
+@router.put("/{bike_id}/wheelbase", response_model=BikeOut)
+async def update_wheelbase(
+    bike_id: str,
+    payload: WheelbaseUpdate,
+    current_user=Depends(get_current_user),
+):
+    """Set wheelbase [mm] and compute/store scale factor (mm per px)."""
+    user_oid = _extract_user_oid(current_user)
+
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+
+    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    points = bike.get("points", []) or []
+    rear_axle = next((p for p in points if p.get("type") == "rear_axle"), None)
+    front_axle = next((p for p in points if p.get("type") == "front_axle"), None)
+
+    if not rear_axle or not front_axle:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot compute scale: need rear_axle and front_axle points",
+        )
+
+    dx = front_axle["x"] - rear_axle["x"]
+    dy = front_axle["y"] - rear_axle["y"]
+    d_px = math.hypot(dx, dy)
+    if d_px <= 0:
+        raise HTTPException(status_code=400, detail="Cannot compute scale: axles coincide")
+
+    wheelbase_mm = float(payload.wheelbase_mm)
+    scale_mm_per_px = wheelbase_mm / d_px
+
+    await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {"$set": {
+            "geometry.wheelbase_mm": wheelbase_mm,
+            "geometry.scale_mm_per_px": scale_mm_per_px,
+            "geometry.scale_source": "wheelbase",
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+
+    updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    hero_id = updated.get("hero_media_id")
+    hero_url = await resolve_hero_url(hero_id)
+    return bike_doc_to_out(updated, hero_url=hero_url)
+
+
+@router.put("/{bike_id}/scale_source", response_model=BikeOut)
+async def update_scale_source(
+    bike_id: str,
+    payload: ScaleSourceUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {"$set": {
+            "geometry.scale_source": payload.scale_source,
+            "updated_at": datetime.utcnow(),
+        }},
+    )
+
+    updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    hero_id = updated.get("hero_media_id")
+    hero_url = await resolve_hero_url(hero_id)
+    return bike_doc_to_out(updated, hero_url=hero_url)
+
 
 @router.get("/{bike_id}/kinematics", response_model=SolverResult)
 async def compute_bike_kinematics(
