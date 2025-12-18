@@ -13,7 +13,7 @@ from app.schemas import (
     BikePointsUpdate,
     RigidBody,
     BikeBodiesOut,
-    BikeGeometryUpdate,
+    # BikeGeometryUpdate,
     # BikeBodiesUpdate,
     # RearCenterUpdate,
     # FrontCenterUpdate,
@@ -317,7 +317,7 @@ async def update_bodies(
 @router.put("/{bike_id}/geometry", response_model=BikeOut)
 async def update_geometry(
     bike_id: str,
-    payload: BikeGeometryUpdate,
+    payload: BikeGeometry,
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
