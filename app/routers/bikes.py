@@ -313,6 +313,58 @@ async def update_bodies(
     # Echo back what we just stored
     return BikeBodiesOut(bodies=payload.bodies)
 
+# bikes/routes.py (or wherever your bikes router lives)
+from datetime import datetime
+import math
+from fastapi import APIRouter, Depends, HTTPException, status
+from bson import ObjectId
+
+router = APIRouter()  # <-- IMPORTANT: keep prefix out of here if you include_router(prefix="/bikes")
+
+# Assumes you already have:
+# - bikes_col()
+# - get_current_user
+# - _extract_user_oid
+# - resolve_hero_url
+# - bike_doc_to_out
+# - BikeGeometry, BikeOut
+
+def _find_point(points: list[dict], ptype: str):
+    return next((p for p in points if p.get("type") == ptype), None)
+
+def _compute_scale_mm_per_px(points: list[dict], source: str, mm_value: float) -> float:
+    if mm_value <= 0:
+        raise HTTPException(status_code=400, detail="Measurement must be > 0")
+
+    if source == "rear_center":
+        a = _find_point(points, "bb") or _find_point(points, "bottom_bracket")
+        b = _find_point(points, "rear_axle")
+        if not a or not b:
+            raise HTTPException(status_code=400, detail="Cannot compute scale: need bb and rear_axle points")
+        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+
+    elif source == "front_center":
+        a = _find_point(points, "bb") or _find_point(points, "bottom_bracket")
+        b = _find_point(points, "front_axle")
+        if not a or not b:
+            raise HTTPException(status_code=400, detail="Cannot compute scale: need bb and front_axle points")
+        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+
+    elif source == "wheelbase":
+        a = _find_point(points, "rear_axle")
+        b = _find_point(points, "front_axle")
+        if not a or not b:
+            raise HTTPException(status_code=400, detail="Cannot compute scale: need rear_axle and front_axle points")
+        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+
+    else:
+        raise HTTPException(status_code=400, detail="Unknown scale_source")
+
+    if d_px <= 0:
+        raise HTTPException(status_code=400, detail="Cannot compute scale: pixel distance is zero")
+
+    return float(mm_value) / float(d_px)
+
 
 @router.put("/{bike_id}/geometry", response_model=BikeOut)
 async def update_geometry(
@@ -321,6 +373,7 @@ async def update_geometry(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
+
     try:
         oid = ObjectId(bike_id)
     except Exception:
@@ -332,7 +385,28 @@ async def update_geometry(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     geometry = bike.get("geometry") or {}
-    geometry.update(payload.model_dump(exclude_unset=True))
+    patch = payload.model_dump(exclude_unset=True)
+
+    # If caller is selecting a scale source, compute scale from the corresponding mm field.
+    if "scale_source" in patch and patch["scale_source"] is not None:
+        src = patch["scale_source"]
+
+        # Prefer the value in THIS request; fallback to already-stored geometry.
+        value_field = f"{src}_mm"
+        mm_value = patch.get(value_field, geometry.get(value_field))
+        if mm_value is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"scale_source='{src}' requires '{value_field}' to be set",
+            )
+
+        points = bike.get("points", []) or []
+        scale = _compute_scale_mm_per_px(points, src, float(mm_value))
+
+        patch["scale_mm_per_px"] = scale
+        patch["scale_source"] = src  # ensure stored
+
+    geometry.update(patch)
 
     await bikes.update_one(
         {"_id": oid, "user_id": user_oid},
@@ -343,7 +417,6 @@ async def update_geometry(
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     return bike_doc_to_out(updated, hero_url=hero_url)
-
 
 
 # @router.put("/{bike_id}/rear_center", response_model=BikeOut)
