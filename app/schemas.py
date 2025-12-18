@@ -83,10 +83,11 @@ class RigidBody(BaseModel):
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
 
-ScaleSource = Literal["rear_center", "wheelbase",]
+ScaleSource = Literal["rear_center", "front_center", "wheelbase",]
 
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
+    front_center_mm: float | None = None
     wheelbase_mm: float | None = None
     scale_mm_per_px: float | None = None
     scale_source: ScaleSource | None = None  # which measurement set the scale
@@ -95,6 +96,8 @@ class BikeGeometry(BaseModel):
 class RearCenterUpdate(BaseModel):
     rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
 
+class FrontCenterUpdate(BaseModel):
+    front_center_mm: float = Field(gt=0, description="Front centre in mm")
 
 class WheelbaseUpdate(BaseModel):
     wheelbase_mm: float = Field(gt=0, description="Wheelbase in mm")

@@ -15,6 +15,7 @@ from app.schemas import (
     BikeBodiesOut,
     BikeBodiesUpdate,
     RearCenterUpdate,
+    FrontCenterUpdate,
     ScaleSourceUpdate,
     WheelbaseUpdate,
     BikeOut,
