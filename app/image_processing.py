@@ -12,8 +12,37 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     YOLO = None
 
+from app.storage import download_media
+
 
 _YOLO_MODEL = None
+
+
+def _ensure_yolo_model_path() -> Optional[str]:
+    model_path = os.getenv("YOLOV8_MODEL_PATH", "").strip()
+    if model_path:
+        return model_path if os.path.exists(model_path) else None
+
+    bucket_name = os.getenv("YOLO_BUCKET_NAME", "").strip()
+    model_name = os.getenv("YOLO_MODEL_NAME", "").strip()
+    if not bucket_name or not model_name:
+        return None
+
+    local_dir = "/tmp/yolo"
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, model_name)
+
+    if os.path.exists(local_path):
+        return local_path
+
+    try:
+        data = download_media(bucket_name, model_name)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        return local_path
+    except Exception as exc:
+        print("WARN image_processing: failed to download YOLO model:", exc)
+        return None
 
 
 def _load_yolo_model() -> Optional["YOLO"]:
@@ -24,10 +53,8 @@ def _load_yolo_model() -> Optional["YOLO"]:
     if YOLO is None:
         return None
 
-    model_path = os.getenv("YOLOV8_MODEL_PATH", "").strip()
+    model_path = _ensure_yolo_model_path()
     if not model_path:
-        return None
-    if not os.path.exists(model_path):
         return None
 
     _YOLO_MODEL = YOLO(model_path)

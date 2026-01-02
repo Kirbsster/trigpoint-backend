@@ -25,3 +25,6 @@ Thumbs.db
 .vscode/
 # SQLite DBs
 *.db
+
+# YOLO model
+*.pt
