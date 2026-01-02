@@ -189,26 +189,17 @@ def _build_internal_model(
 
 
 def _rigid_pairs(point_ids: list[str], closed: bool) -> list[tuple[str, str]]:
-    """Return constraint pairs that make a k-point body rigid in 2D (fan triangulation)."""
+    """Return constraint pairs for a rigid point set (complete graph)."""
     pids = [pid for pid in point_ids if pid]
-    if len(pids) < 2:
+    n = len(pids)
+    if n < 2:
         return []
 
     pairs: list[tuple[str, str]] = []
-
-    # Visible perimeter / chain edges (keep what user intended)
-    for a, b in zip(pids, pids[1:]):
-        pairs.append((a, b))
-    if closed and len(pids) > 2:
-        pairs.append((pids[-1], pids[0]))
-
-    # Hidden diagonals: fan from first point to all others from index 2+
-    # (p0-p2), (p0-p3), ... makes it rigid
-    if len(pids) >= 3:
-        p0 = pids[0]
-        for pid in pids[2:]:
-            pairs.append((p0, pid))
-
+    for i in range(n - 1):
+        a = pids[i]
+        for j in range(i + 1, n):
+            pairs.append((a, pids[j]))
     return pairs
 
 # ------------ Core PBD solver ------------

@@ -92,19 +92,6 @@ class BikeGeometry(BaseModel):
     scale_mm_per_px: float | None = None
     scale_source: ScaleSource | None = None  # which measurement set the scale
 
-# class RearCenterUpdate(BaseModel):
-#     rear_center_mm: float = Field(gt=0, description="Rear centre in mm")
-
-# class FrontCenterUpdate(BaseModel):
-#     front_center_mm: float = Field(gt=0, description="Front centre in mm")
-
-# class WheelbaseUpdate(BaseModel):
-#     wheelbase_mm: float = Field(gt=0, description="Wheelbase in mm")
-
-
-# class ScaleSourceUpdate(BaseModel):
-#     scale_source: ScaleSource
-
 
 class BikePointsUpdate(BaseModel):
     points: List[BikePoint] = Field(default_factory=list)
