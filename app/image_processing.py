@@ -33,12 +33,15 @@ def _ensure_yolo_model_path() -> Optional[str]:
     local_path = os.path.join(local_dir, model_name)
 
     if os.path.exists(local_path):
+        print("INFO image_processing: using cached YOLO model at", local_path)
         return local_path
 
     try:
+        print("INFO image_processing: downloading YOLO model from", bucket_name, model_name)
         data = download_media(bucket_name, model_name)
         with open(local_path, "wb") as f:
             f.write(data)
+        print("INFO image_processing: YOLO model saved to", local_path)
         return local_path
     except Exception as exc:
         print("WARN image_processing: failed to download YOLO model:", exc)
