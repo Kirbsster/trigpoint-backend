@@ -118,12 +118,16 @@ _client: Optional[storage.Client] = None
 _bucket: Optional[storage.Bucket] = None
 
 
-def get_bucket() -> storage.Bucket:
+def get_bucket(bucket_name: str | None = None) -> storage.Bucket:
     global _client, _bucket
-    if _bucket is None:
-        _client = storage.Client()
-        _bucket = _client.bucket(GCS_BUCKET_NAME)
-    return _bucket
+    if bucket_name is None or bucket_name == GCS_BUCKET_NAME:
+        if _bucket is None:
+            _client = storage.Client()
+            _bucket = _client.bucket(GCS_BUCKET_NAME)
+        return _bucket
+
+    client = storage.Client()
+    return client.bucket(bucket_name)
 
 
 async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> tuple[str, int]:
