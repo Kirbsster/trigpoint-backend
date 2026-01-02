@@ -27,7 +27,7 @@ from app.schemas import (
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
 from app.db import bikes_col, media_items_col
-from app.storage import delete_media, GCS_BUCKET_NAME
+from app.storage import delete_media, delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url
@@ -861,21 +861,24 @@ async def delete_bike(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     media_cursor = media_items.find({"bike_id": oid, "user_id": user_oid})
+    bucket_names = {os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)}
     async for media_doc in media_cursor:
         bucket_name = media_doc.get("bucket", os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME))
-        key = media_doc.get("storage_key")
-        if key:
-            try:
-                delete_media(bucket_name, key)
-            except Exception as exc:
-                logging.warning(
-                    "Failed to delete media key=%s bucket=%s for bike %s: %s",
-                    key,
-                    bucket_name,
-                    bike_id,
-                    exc,
-                )
+        bucket_names.add(bucket_name)
         await media_items.delete_one({"_id": media_doc["_id"]})
+
+    prefix = f"users/{user_oid}/bikes/{bike_id}/"
+    for bucket_name in bucket_names:
+        try:
+            delete_media_prefix(bucket_name, prefix)
+        except Exception as exc:
+            logging.warning(
+                "Failed to delete media prefix=%s bucket=%s for bike %s: %s",
+                prefix,
+                bucket_name,
+                bike_id,
+                exc,
+            )
 
     await bikes.delete_one({"_id": oid, "user_id": user_oid})
     return Response(status_code=status.HTTP_204_NO_CONTENT)

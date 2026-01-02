@@ -163,6 +163,14 @@ def delete_media(bucket_name: str, key: str) -> None:
     blob.delete()
 
 
+def delete_media_prefix(bucket_name: str, prefix: str) -> None:
+    """Delete all media objects under a key prefix."""
+    bucket = get_bucket(bucket_name)
+    blobs = bucket.list_blobs(prefix=prefix)
+    for blob in blobs:
+        blob.delete()
+
+
 def generate_signed_url(key: str, expires_in: int = 3600) -> str:
     """Generate a v4 signed URL for a GCS object using IAM SignBlob.
 
