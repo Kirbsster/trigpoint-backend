@@ -7,3 +7,5 @@ passlib[argon2]>=1.7
 python-jose[cryptography]>=3.3
 google-cloud-storage
 python-multipart
+Pillow
+ultralytics

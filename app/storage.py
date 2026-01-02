@@ -149,6 +149,19 @@ async def upload_bike_image(user_id: str, bike_id: str, file: UploadFile) -> tup
     return key, len(content)
 
 
+def upload_bytes_to_key(
+    bucket_name: str,
+    key: str,
+    content: bytes,
+    content_type: str,
+) -> int:
+    """Upload raw bytes to a specific key and return size."""
+    bucket = get_bucket(bucket_name)
+    blob = bucket.blob(key)
+    blob.upload_from_string(content, content_type=content_type)
+    return len(content)
+
+
 def download_media(bucket_name: str, key: str) -> bytes:
     """Download raw bytes for a media object."""
     bucket = get_bucket(bucket_name)
@@ -168,6 +181,16 @@ def delete_media_prefix(bucket_name: str, prefix: str) -> None:
     bucket = get_bucket(bucket_name)
     blobs = bucket.list_blobs(prefix=prefix)
     for blob in blobs:
+        blob.delete()
+
+
+def delete_media_prefix_except(bucket_name: str, prefix: str, keep_keys: set[str]) -> None:
+    """Delete all media objects under prefix except the keep_keys."""
+    bucket = get_bucket(bucket_name)
+    blobs = bucket.list_blobs(prefix=prefix)
+    for blob in blobs:
+        if blob.name in keep_keys:
+            continue
         blob.delete()
 
 

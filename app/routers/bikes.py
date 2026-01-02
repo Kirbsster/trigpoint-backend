@@ -27,7 +27,7 @@ from app.schemas import (
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
 from app.db import bikes_col, media_items_col
-from app.storage import delete_media, delete_media_prefix, GCS_BUCKET_NAME
+from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url

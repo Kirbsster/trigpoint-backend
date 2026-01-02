@@ -17,7 +17,17 @@ import os
 
 from app.db import bikes_col, media_items_col
 from app.routers.auth import get_current_user
-from app.storage import upload_bike_image, download_media, delete_media, GCS_BUCKET_NAME
+from app.storage import (
+    upload_bytes_to_key,
+    download_media,
+    delete_media_prefix_except,
+    GCS_BUCKET_NAME,
+)
+from app.image_processing import (
+    detect_single_bike_bbox,
+    crop_and_resize_webp,
+    open_image_from_bytes,
+)
 
 
 router = APIRouter(prefix="/bikes", tags=["media"])
@@ -34,9 +44,10 @@ class MediaOut(BaseModel):
     size_bytes: int
     role: str
     created_at: datetime
+    warning: Optional[str] = None
 
 
-def media_doc_to_out(doc) -> MediaOut:
+def media_doc_to_out(doc, warning: Optional[str] = None) -> MediaOut:
     return MediaOut(
         id=str(doc["_id"]),
         bike_id=str(doc["bike_id"]),
@@ -47,6 +58,7 @@ def media_doc_to_out(doc) -> MediaOut:
         size_bytes=doc["size_bytes"],
         role=doc.get("role", "hero"),
         created_at=doc["created_at"],
+        warning=warning,
     )
 
 
@@ -76,17 +88,6 @@ def _extract_user_oid(current_user) -> ObjectId:
     return raw_id
 
 
-async def _delete_media_doc(media_doc, media_items) -> None:
-    bucket_name = media_doc.get("bucket", DEFAULT_BUCKET)
-    key = media_doc.get("storage_key")
-    if key:
-        try:
-            delete_media(bucket_name, key)
-        except Exception as exc:
-            print("WARN media.delete_media failed:", exc)
-    await media_items.delete_one({"_id": media_doc["_id"]})
-
-
 @router.post("/{bike_id}/media/hero", response_model=MediaOut, status_code=status.HTTP_201_CREATED)
 async def upload_hero_image(
     bike_id: str,
@@ -114,39 +115,122 @@ async def upload_hero_image(
     if bike.get("user_id") != user_oid:
         raise HTTPException(status_code=403, detail="Not your bike")
 
-    old_hero_id = bike.get("hero_media_id")
-    old_media_doc = None
-    if old_hero_id:
-        old_media_doc = await media_items.find_one({"_id": old_hero_id, "bike_id": bike_oid})
+    original_content = await file.read()
+    if not original_content:
+        raise HTTPException(status_code=400, detail="Empty upload")
 
-    # Upload to GCS via storage
-    # NOTE: this assumes upload_bike_image returns (storage_key, size)
-    storage_key, size = await upload_bike_image(str(user_oid), bike_id, file)
+    filename = file.filename or "image"
+    parts = filename.rsplit(".", 1)
+    ext = parts[1].lower() if len(parts) == 2 else "bin"
 
-    now = datetime.utcnow()
-    media_doc = {
-        "user_id": user_oid,
-        "bike_id": bike_oid,
-        "bucket": os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME),
-        "storage_key": storage_key,
-        "content_type": file.content_type,
-        "size_bytes": size,
-        "role": "hero",
-        "created_at": now,
-    }
-    result = await media_items.insert_one(media_doc)
-    media_doc["_id"] = result.inserted_id
+    bucket_name = os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)
+    base_prefix = f"users/{user_oid}/bikes/{bike_id}/images"
+    hero_prefix = f"{base_prefix}/hero_"
 
-    # Link to bike as hero
-    await bikes.update_one(
-        {"_id": bike_oid},
-        {"$set": {"hero_media_id": media_doc["_id"]}},
+    warning: Optional[str] = None
+    processed = {}
+
+    try:
+        image = open_image_from_bytes(original_content)
+        bbox, warning = detect_single_bike_bbox(image)
+        if bbox:
+            processed["low"] = crop_and_resize_webp(image, bbox, long_edge_px=150)
+            processed["med"] = crop_and_resize_webp(image, bbox, long_edge_px=450)
+            processed["high"] = crop_and_resize_webp(image, bbox, long_edge_px=None)
+    except Exception as exc:
+        warning = f"Image processing failed; saved original image. ({exc})"
+
+    original_key = f"{base_prefix}/hero_original.{ext}"
+    upload_bytes_to_key(
+        bucket_name=bucket_name,
+        key=original_key,
+        content=original_content,
+        content_type=file.content_type or "application/octet-stream",
     )
 
-    if old_media_doc and old_media_doc.get("_id") != media_doc["_id"]:
-        await _delete_media_doc(old_media_doc, media_items)
+    created_at = datetime.utcnow()
+    media_docs = []
+    media_docs.append({
+        "user_id": user_oid,
+        "bike_id": bike_oid,
+        "bucket": bucket_name,
+        "storage_key": original_key,
+        "content_type": file.content_type,
+        "size_bytes": len(original_content),
+        "role": "hero_original",
+        "created_at": created_at,
+    })
 
-    return media_doc_to_out(media_doc)
+    if processed and not warning:
+        key_low = f"{base_prefix}/hero_low.webp"
+        key_med = f"{base_prefix}/hero_med.webp"
+        key_high = f"{base_prefix}/hero_high.webp"
+
+        upload_bytes_to_key(bucket_name, key_low, processed["low"], "image/webp")
+        upload_bytes_to_key(bucket_name, key_med, processed["med"], "image/webp")
+        upload_bytes_to_key(bucket_name, key_high, processed["high"], "image/webp")
+
+        media_docs.extend([
+            {
+                "user_id": user_oid,
+                "bike_id": bike_oid,
+                "bucket": bucket_name,
+                "storage_key": key_low,
+                "content_type": "image/webp",
+                "size_bytes": len(processed["low"]),
+                "role": "hero_low",
+                "created_at": created_at,
+            },
+            {
+                "user_id": user_oid,
+                "bike_id": bike_oid,
+                "bucket": bucket_name,
+                "storage_key": key_med,
+                "content_type": "image/webp",
+                "size_bytes": len(processed["med"]),
+                "role": "hero_med",
+                "created_at": created_at,
+            },
+            {
+                "user_id": user_oid,
+                "bike_id": bike_oid,
+                "bucket": bucket_name,
+                "storage_key": key_high,
+                "content_type": "image/webp",
+                "size_bytes": len(processed["high"]),
+                "role": "hero_high",
+                "created_at": created_at,
+            },
+        ])
+
+    result = await media_items.insert_many(media_docs)
+    inserted_ids = result.inserted_ids
+    for doc, inserted_id in zip(media_docs, inserted_ids):
+        doc["_id"] = inserted_id
+
+    hero_doc = None
+    for doc in media_docs:
+        if doc.get("role") == "hero_high":
+            hero_doc = doc
+            break
+    if hero_doc is None:
+        hero_doc = media_docs[0]
+
+    await bikes.update_one(
+        {"_id": bike_oid},
+        {"$set": {"hero_media_id": hero_doc["_id"]}},
+    )
+
+    keep_keys = {doc["storage_key"] for doc in media_docs}
+    delete_media_prefix_except(bucket_name, hero_prefix, keep_keys)
+
+    await media_items.delete_many({
+        "bike_id": bike_oid,
+        "_id": {"$nin": inserted_ids},
+        "role": {"$regex": "^hero_"},
+    })
+
+    return media_doc_to_out(hero_doc, warning=warning)
 
 
 @router.delete("/{bike_id}/media/hero", status_code=status.HTTP_204_NO_CONTENT)
@@ -174,9 +258,24 @@ async def delete_hero_image(
     if not hero_id:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    media_doc = await media_items.find_one({"_id": hero_id, "bike_id": bike_oid})
-    if media_doc:
-        await _delete_media_doc(media_doc, media_items)
+    base_prefix = f"users/{user_oid}/bikes/{bike_id}/images"
+    hero_prefix = f"{base_prefix}/hero_"
+
+    hero_docs = []
+    async for doc in media_items.find({"bike_id": bike_oid, "role": {"$regex": "^hero_"}}):
+        hero_docs.append(doc)
+
+    bucket_names = {os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)}
+    for doc in hero_docs:
+        bucket_names.add(doc.get("bucket", os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)))
+
+    for bucket_name in bucket_names:
+        delete_media_prefix_except(bucket_name, hero_prefix, keep_keys=set())
+
+    await media_items.delete_many({
+        "bike_id": bike_oid,
+        "role": {"$regex": "^hero_"},
+    })
 
     await bikes.update_one(
         {"_id": bike_oid},
