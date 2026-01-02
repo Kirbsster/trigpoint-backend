@@ -17,10 +17,11 @@ import os
 
 from app.db import bikes_col, media_items_col
 from app.routers.auth import get_current_user
-from app.storage import upload_bike_image, download_media, GCS_BUCKET_NAME
+from app.storage import upload_bike_image, download_media, delete_media, GCS_BUCKET_NAME
 
 
 router = APIRouter(prefix="/bikes", tags=["media"])
+DEFAULT_BUCKET = os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)
 
 
 class MediaOut(BaseModel):
@@ -75,6 +76,17 @@ def _extract_user_oid(current_user) -> ObjectId:
     return raw_id
 
 
+async def _delete_media_doc(media_doc, media_items) -> None:
+    bucket_name = media_doc.get("bucket", DEFAULT_BUCKET)
+    key = media_doc.get("storage_key")
+    if key:
+        try:
+            delete_media(bucket_name, key)
+        except Exception as exc:
+            print("WARN media.delete_media failed:", exc)
+    await media_items.delete_one({"_id": media_doc["_id"]})
+
+
 @router.post("/{bike_id}/media/hero", response_model=MediaOut, status_code=status.HTTP_201_CREATED)
 async def upload_hero_image(
     bike_id: str,
@@ -102,6 +114,11 @@ async def upload_hero_image(
     if bike.get("user_id") != user_oid:
         raise HTTPException(status_code=403, detail="Not your bike")
 
+    old_hero_id = bike.get("hero_media_id")
+    old_media_doc = None
+    if old_hero_id:
+        old_media_doc = await media_items.find_one({"_id": old_hero_id, "bike_id": bike_oid})
+
     # Upload to GCS via storage
     # NOTE: this assumes upload_bike_image returns (storage_key, size)
     storage_key, size = await upload_bike_image(str(user_oid), bike_id, file)
@@ -126,13 +143,51 @@ async def upload_hero_image(
         {"$set": {"hero_media_id": media_doc["_id"]}},
     )
 
+    if old_media_doc and old_media_doc.get("_id") != media_doc["_id"]:
+        await _delete_media_doc(old_media_doc, media_items)
+
     return media_doc_to_out(media_doc)
+
+
+@router.delete("/{bike_id}/media/hero", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_hero_image(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    bikes = bikes_col()
+    media_items = media_items_col()
+
+    try:
+        bike_oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bike = await bikes.find_one({"_id": bike_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    user_oid = _extract_user_oid(current_user)
+    if bike.get("user_id") != user_oid:
+        raise HTTPException(status_code=403, detail="Not your bike")
+
+    hero_id = bike.get("hero_media_id")
+    if not hero_id:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    media_doc = await media_items.find_one({"_id": hero_id, "bike_id": bike_oid})
+    if media_doc:
+        await _delete_media_doc(media_doc, media_items)
+
+    await bikes.update_one(
+        {"_id": bike_oid},
+        {"$unset": {"hero_media_id": ""}},
+    )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # second router for serving media bytes via Cloud Run
 media_router = APIRouter(prefix="/media", tags=["media"])
-
-DEFAULT_BUCKET = os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)
 
 
 @media_router.get("/{media_id}")

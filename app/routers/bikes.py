@@ -1,5 +1,6 @@
 # app/routers/bikes.py
 import math
+import os
 from datetime import datetime
 from typing import Optional, List
 import logging
@@ -25,7 +26,8 @@ from app.schemas import (
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
-from app.db import bikes_col#, media_items_col
+from app.db import bikes_col, media_items_col
+from app.storage import delete_media, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url
@@ -852,13 +854,28 @@ async def delete_bike(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
+    media_items = media_items_col()
 
-    # Optional: fetch first if you want to delete media too
     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
-    # TODO later: delete associated media (hero_media_id etc.) if desired.
+    media_cursor = media_items.find({"bike_id": oid, "user_id": user_oid})
+    async for media_doc in media_cursor:
+        bucket_name = media_doc.get("bucket", os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME))
+        key = media_doc.get("storage_key")
+        if key:
+            try:
+                delete_media(bucket_name, key)
+            except Exception as exc:
+                logging.warning(
+                    "Failed to delete media key=%s bucket=%s for bike %s: %s",
+                    key,
+                    bucket_name,
+                    bike_id,
+                    exc,
+                )
+        await media_items.delete_one({"_id": media_doc["_id"]})
 
     await bikes.delete_one({"_id": oid, "user_id": user_oid})
     return Response(status_code=status.HTTP_204_NO_CONTENT)

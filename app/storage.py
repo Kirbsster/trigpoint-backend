@@ -156,6 +156,13 @@ def download_media(bucket_name: str, key: str) -> bytes:
     return blob.download_as_bytes()
 
 
+def delete_media(bucket_name: str, key: str) -> None:
+    """Delete a media object from storage."""
+    bucket = get_bucket(bucket_name)
+    blob = bucket.blob(key)
+    blob.delete()
+
+
 def generate_signed_url(key: str, expires_in: int = 3600) -> str:
     """Generate a v4 signed URL for a GCS object using IAM SignBlob.
 
