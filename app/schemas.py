@@ -73,6 +73,12 @@ class BikePoint(BaseModel):
     name: Optional[str] = None
     coords: List[PointCoord] = Field(default_factory=list)
 
+class PerspectivePoint(BaseModel):
+    id: str
+    type: str
+    x: float
+    y: float
+
 
 class RigidBody(BaseModel):
     id: str
@@ -83,6 +89,14 @@ class RigidBody(BaseModel):
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
 
+class PerspectiveCorrection(BaseModel):
+    rear_rim_pts: List[PointCoord] = Field(default_factory=list)
+    front_rim_pts: List[PointCoord] = Field(default_factory=list)
+    H: List[List[float]] = Field(default_factory=list)       # image -> rectified
+    H_inv: List[List[float]] = Field(default_factory=list)   # rectified -> image
+    status: Optional[str] = None                             # ok | warning | invalid
+    version: int = 1
+
 ScaleSource = Literal["rear_center", "front_center", "wheelbase",]
 
 class BikeGeometry(BaseModel):
@@ -91,6 +105,7 @@ class BikeGeometry(BaseModel):
     wheelbase_mm: float | None = None
     scale_mm_per_px: float | None = None
     scale_source: ScaleSource | None = None  # which measurement set the scale
+    perspective: PerspectiveCorrection | None = None
 
 
 class BikePointsUpdate(BaseModel):
@@ -138,10 +153,10 @@ class BikeOut(BaseModel):
     hero_media_id: Optional[str] = None
     hero_url: Optional[str] = None
     hero_thumb_url: Optional[str] = None
+    hero_perspective_points: Optional[List[PerspectivePoint]] = None
     points: Optional[List[BikePoint]] = None
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None
     kinematics: Optional[BikeKinematics] = None
 
     
-

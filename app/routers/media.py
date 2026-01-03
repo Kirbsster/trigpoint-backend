@@ -11,7 +11,7 @@ from fastapi import (
     status,
     Response,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from bson import ObjectId
 import os
 
@@ -28,6 +28,7 @@ from app.image_processing import (
     crop_and_resize_webp,
     open_image_from_bytes,
 )
+from app.schemas import PerspectivePoint
 
 
 router = APIRouter(prefix="/bikes", tags=["media"])
@@ -46,6 +47,10 @@ class MediaOut(BaseModel):
     created_at: datetime
     variants: Optional[dict] = None
     warning: Optional[str] = None
+
+
+class HeroPerspectiveUpdate(BaseModel):
+    points: list[PerspectivePoint] = Field(default_factory=list)
 
 
 def media_doc_to_out(doc, warning: Optional[str] = None) -> MediaOut:
@@ -206,6 +211,7 @@ async def upload_hero_image(
         "size_bytes": primary["size_bytes"],
         "role": "hero",
         "variants": variants,
+        "perspective_points": [],
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -267,6 +273,47 @@ async def delete_hero_image(
         {"_id": bike_oid},
         {"$unset": {"hero_media_id": ""}},
     )
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/{bike_id}/media/hero/perspective", status_code=status.HTTP_204_NO_CONTENT)
+async def update_hero_perspective(
+    bike_id: str,
+    payload: HeroPerspectiveUpdate,
+    current_user=Depends(get_current_user),
+):
+    bikes = bikes_col()
+    media_items = media_items_col()
+
+    try:
+        bike_oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bike = await bikes.find_one({"_id": bike_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    user_oid = _extract_user_oid(current_user)
+    if bike.get("user_id") != user_oid:
+        raise HTTPException(status_code=403, detail="Not your bike")
+
+    hero_id = bike.get("hero_media_id")
+    if not hero_id:
+        raise HTTPException(status_code=404, detail="Hero media not found")
+
+    update = {
+        "perspective_points": [p.dict() for p in payload.points],
+        "updated_at": datetime.utcnow(),
+    }
+    result = await media_items.update_one(
+        {"_id": hero_id, "bike_id": bike_oid},
+        {"$set": update},
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Hero media not found")
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
