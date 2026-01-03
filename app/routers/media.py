@@ -44,6 +44,7 @@ class MediaOut(BaseModel):
     size_bytes: int
     role: str
     created_at: datetime
+    variants: Optional[dict] = None
     warning: Optional[str] = None
 
 
@@ -58,6 +59,7 @@ def media_doc_to_out(doc, warning: Optional[str] = None) -> MediaOut:
         size_bytes=doc["size_bytes"],
         role=doc.get("role", "hero"),
         created_at=doc["created_at"],
+        variants=doc.get("variants"),
         warning=warning,
     )
 
@@ -148,18 +150,22 @@ async def upload_hero_image(
         content_type=file.content_type or "application/octet-stream",
     )
 
-    created_at = datetime.utcnow()
-    media_docs = []
-    media_docs.append({
-        "user_id": user_oid,
-        "bike_id": bike_oid,
-        "bucket": bucket_name,
-        "storage_key": original_key,
-        "content_type": file.content_type,
-        "size_bytes": len(original_content),
-        "role": "hero_original",
-        "created_at": created_at,
-    })
+    existing_doc = None
+    if bike.get("hero_media_id"):
+        existing_doc = await media_items.find_one({"_id": bike["hero_media_id"], "bike_id": bike_oid})
+
+    created_at = existing_doc.get("created_at") if existing_doc else datetime.utcnow()
+    updated_at = datetime.utcnow()
+
+    variants = {
+        "original": {
+            "storage_key": original_key,
+            "content_type": file.content_type,
+            "size_bytes": len(original_content),
+        }
+    }
+
+    keep_keys = {original_key}
 
     if processed and not warning:
         key_low = f"{base_prefix}/hero_low.webp"
@@ -170,67 +176,59 @@ async def upload_hero_image(
         upload_bytes_to_key(bucket_name, key_med, processed["med"], "image/webp")
         upload_bytes_to_key(bucket_name, key_high, processed["high"], "image/webp")
 
-        media_docs.extend([
-            {
-                "user_id": user_oid,
-                "bike_id": bike_oid,
-                "bucket": bucket_name,
-                "storage_key": key_low,
-                "content_type": "image/webp",
-                "size_bytes": len(processed["low"]),
-                "role": "hero_low",
-                "created_at": created_at,
-            },
-            {
-                "user_id": user_oid,
-                "bike_id": bike_oid,
-                "bucket": bucket_name,
-                "storage_key": key_med,
-                "content_type": "image/webp",
-                "size_bytes": len(processed["med"]),
-                "role": "hero_med",
-                "created_at": created_at,
-            },
-            {
-                "user_id": user_oid,
-                "bike_id": bike_oid,
-                "bucket": bucket_name,
-                "storage_key": key_high,
-                "content_type": "image/webp",
-                "size_bytes": len(processed["high"]),
-                "role": "hero_high",
-                "created_at": created_at,
-            },
-        ])
+        variants["low"] = {
+            "storage_key": key_low,
+            "content_type": "image/webp",
+            "size_bytes": len(processed["low"]),
+        }
+        variants["med"] = {
+            "storage_key": key_med,
+            "content_type": "image/webp",
+            "size_bytes": len(processed["med"]),
+        }
+        variants["high"] = {
+            "storage_key": key_high,
+            "content_type": "image/webp",
+            "size_bytes": len(processed["high"]),
+        }
 
-    result = await media_items.insert_many(media_docs)
-    inserted_ids = result.inserted_ids
-    for doc, inserted_id in zip(media_docs, inserted_ids):
-        doc["_id"] = inserted_id
+        keep_keys.update([key_low, key_med, key_high])
 
-    hero_doc = None
-    for doc in media_docs:
-        if doc.get("role") == "hero_high":
-            hero_doc = doc
-            break
-    if hero_doc is None:
-        hero_doc = media_docs[0]
+    primary_variant = "high" if "high" in variants else "original"
+    primary = variants[primary_variant]
+
+    media_doc = {
+        "user_id": user_oid,
+        "bike_id": bike_oid,
+        "bucket": bucket_name,
+        "storage_key": primary["storage_key"],
+        "content_type": primary["content_type"],
+        "size_bytes": primary["size_bytes"],
+        "role": "hero",
+        "variants": variants,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+    if existing_doc:
+        await media_items.update_one({"_id": existing_doc["_id"]}, {"$set": media_doc})
+        media_doc["_id"] = existing_doc["_id"]
+    else:
+        result = await media_items.insert_one(media_doc)
+        media_doc["_id"] = result.inserted_id
+        await bikes.update_one(
+            {"_id": bike_oid},
+            {"$set": {"hero_media_id": media_doc["_id"]}},
+        )
+
+    delete_media_prefix_except(bucket_name, hero_prefix, keep_keys)
 
     await bikes.update_one(
         {"_id": bike_oid},
-        {"$set": {"hero_media_id": hero_doc["_id"]}},
+        {"$set": {"hero_media_id": media_doc["_id"]}},
     )
 
-    keep_keys = {doc["storage_key"] for doc in media_docs}
-    delete_media_prefix_except(bucket_name, hero_prefix, keep_keys)
-
-    await media_items.delete_many({
-        "bike_id": bike_oid,
-        "_id": {"$nin": inserted_ids},
-        "role": {"$regex": "^hero_"},
-    })
-
-    return media_doc_to_out(hero_doc, warning=warning)
+    return media_doc_to_out(media_doc, warning=warning)
 
 
 @router.delete("/{bike_id}/media/hero", status_code=status.HTTP_204_NO_CONTENT)
@@ -261,21 +259,9 @@ async def delete_hero_image(
     base_prefix = f"users/{user_oid}/bikes/{bike_id}/images"
     hero_prefix = f"{base_prefix}/hero_"
 
-    hero_docs = []
-    async for doc in media_items.find({"bike_id": bike_oid, "role": {"$regex": "^hero_"}}):
-        hero_docs.append(doc)
+    delete_media_prefix_except(bucket_name, hero_prefix, keep_keys=set())
 
-    bucket_names = {os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)}
-    for doc in hero_docs:
-        bucket_names.add(doc.get("bucket", os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)))
-
-    for bucket_name in bucket_names:
-        delete_media_prefix_except(bucket_name, hero_prefix, keep_keys=set())
-
-    await media_items.delete_many({
-        "bike_id": bike_oid,
-        "role": {"$regex": "^hero_"},
-    })
+    await media_items.delete_one({"_id": hero_id, "bike_id": bike_oid})
 
     await bikes.update_one(
         {"_id": bike_oid},

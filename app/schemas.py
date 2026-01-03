@@ -137,11 +137,11 @@ class BikeOut(BaseModel):
     updated_at: datetime
     hero_media_id: Optional[str] = None
     hero_url: Optional[str] = None
+    hero_thumb_url: Optional[str] = None
     points: Optional[List[BikePoint]] = None
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None
     kinematics: Optional[BikeKinematics] = None
 
     
-
 

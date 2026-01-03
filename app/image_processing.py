@@ -8,6 +8,11 @@ from typing import Optional, Tuple
 from PIL import Image
 
 try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency at runtime
+    torch = None
+
+try:
     from ultralytics import YOLO
 except Exception:  # pragma: no cover - optional dependency at runtime
     YOLO = None
@@ -70,6 +75,12 @@ def detect_single_bike_bbox(image: Image.Image) -> Tuple[Optional[Tuple[int, int
     if model is None:
         return None, "Bike detection unavailable; saved original image."
 
+    if torch is not None:
+        try:
+            torch.backends.nnpack.enabled = False
+        except Exception:
+            pass
+
     results = model(image, verbose=False)
     if not results:
         return None, "No bike detected; saved original image."
@@ -96,6 +107,20 @@ def detect_single_bike_bbox(image: Image.Image) -> Tuple[Optional[Tuple[int, int
 
     _, xyxy = bikes[0]
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+
+    pad = 0.08
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    x1 = int(round(x1 - bw * pad))
+    y1 = int(round(y1 - bh * pad))
+    x2 = int(round(x2 + bw * pad))
+    y2 = int(round(y2 + bh * pad))
+
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(image.width, x2)
+    y2 = min(image.height, y2)
+
     return (x1, y1, x2, y2), None
 
 

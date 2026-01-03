@@ -30,11 +30,15 @@ from app.db import bikes_col, media_items_col
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
-from app.utils_media import resolve_hero_url
+from app.utils_media import resolve_hero_url, resolve_hero_variant_url
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
-def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
+def bike_doc_to_out(
+    doc,
+    hero_url: Optional[str] = None,
+    hero_thumb_url: Optional[str] = None,
+) -> BikeOut:
     # normalise points if present
     raw_points = doc.get("points") or []
     points: list[BikePoint] = []
@@ -88,6 +92,7 @@ def bike_doc_to_out(doc, hero_url: Optional[str] = None) -> BikeOut:
         hero_media_id=(str(doc["hero_media_id"]) if doc.get("hero_media_id") else None),
         # prefer the explicit hero_url passed in, fall back to any stored value
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
+        hero_thumb_url=hero_thumb_url if hero_thumb_url is not None else doc.get("hero_thumb_url"),
         points=points or None,
         bodies=bodies or None,
         geometry=geometry,
@@ -158,7 +163,8 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
     for d in docs:
         hero_id = d.get("hero_media_id")
         hero_url = await resolve_hero_url(hero_id)
-        out.append(bike_doc_to_out(d, hero_url=hero_url))
+        hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+        out.append(bike_doc_to_out(d, hero_url=hero_url, hero_thumb_url=hero_thumb_url))
 
     return out
 
@@ -182,7 +188,8 @@ async def get_bike(
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
 
-    return bike_doc_to_out(doc, hero_url=hero_url)
+    hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+    return bike_doc_to_out(doc, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
 
 def _ensure_unique_point_ids(points: list[BikePoint]) -> None:
     ids = [p.id for p in points if p.id]
@@ -229,7 +236,8 @@ async def update_bike_points(
     updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
-    return bike_doc_to_out(updated, hero_url=hero_url)
+    hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
 
 
 @router.get("/{bike_id}/bodies", response_model=BikeBodiesOut)
@@ -418,7 +426,8 @@ async def update_geometry(
     updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
-    return bike_doc_to_out(updated, hero_url=hero_url)
+    hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
 
 
 # @router.put("/{bike_id}/rear_center", response_model=BikeOut)
