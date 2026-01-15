@@ -80,6 +80,14 @@ class PerspectivePoint(BaseModel):
     y: float
 
 
+class RimEllipse(BaseModel):
+    cx: float
+    cy: float
+    rx: float
+    ry: float
+    angle_deg: float
+
+
 class RigidBody(BaseModel):
     id: str
     name: Optional[str] = None
@@ -153,7 +161,7 @@ class BikeOut(BaseModel):
     hero_media_id: Optional[str] = None
     hero_url: Optional[str] = None
     hero_thumb_url: Optional[str] = None
-    hero_perspective_points: Optional[List[PerspectivePoint]] = None
+    hero_perspective_ellipses: Optional[Dict[str, RimEllipse]] = None
     points: Optional[List[BikePoint]] = None
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None

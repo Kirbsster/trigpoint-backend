@@ -23,7 +23,7 @@ from app.schemas import (
     BikeOut,
     BikeGeometry,
     BikeKinematics,
-    PerspectivePoint,
+    RimEllipse,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
@@ -39,7 +39,7 @@ def bike_doc_to_out(
     doc,
     hero_url: Optional[str] = None,
     hero_thumb_url: Optional[str] = None,
-    hero_perspective_points: Optional[list[dict]] = None,
+    hero_perspective_ellipses: Optional[dict] = None,
 ) -> BikeOut:
     # normalise points if present
     raw_points = doc.get("points") or []
@@ -82,16 +82,16 @@ def bike_doc_to_out(
                 doc.get("_id"), kin_raw, exc
             )
 
-    perspective_points: Optional[list[PerspectivePoint]] = None
-    if hero_perspective_points is not None:
-        perspective_points = []
-        for p in hero_perspective_points:
+    perspective_ellipses: Optional[dict[str, RimEllipse]] = None
+    if hero_perspective_ellipses is not None:
+        perspective_ellipses = {}
+        for key, raw in hero_perspective_ellipses.items():
             try:
-                perspective_points.append(PerspectivePoint(**p))
+                perspective_ellipses[key] = RimEllipse(**raw)
             except Exception as exc:
                 logging.warning(
-                    "Skipping invalid perspective point on bike %s: %r (%s)",
-                    doc.get("_id"), p, exc
+                    "Skipping invalid perspective ellipse on bike %s: %r (%s)",
+                    doc.get("_id"), raw, exc
                 )
 
     return BikeOut(
@@ -107,7 +107,7 @@ def bike_doc_to_out(
         # prefer the explicit hero_url passed in, fall back to any stored value
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
         hero_thumb_url=hero_thumb_url if hero_thumb_url is not None else doc.get("hero_thumb_url"),
-        hero_perspective_points=perspective_points or None,
+        hero_perspective_ellipses=perspective_ellipses or None,
         points=points or None,
         bodies=bodies or None,
         geometry=geometry,
@@ -202,18 +202,18 @@ async def get_bike(
 
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
-    hero_perspective_points = None
+    hero_perspective_ellipses = None
     if hero_id:
         media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
         if media_doc:
-            hero_perspective_points = media_doc.get("perspective_points")
+            hero_perspective_ellipses = media_doc.get("perspective_ellipses")
 
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
     return bike_doc_to_out(
         doc,
         hero_url=hero_url,
         hero_thumb_url=hero_thumb_url,
-        hero_perspective_points=hero_perspective_points,
+        hero_perspective_ellipses=hero_perspective_ellipses,
     )
 
 def _ensure_unique_point_ids(points: list[BikePoint]) -> None:

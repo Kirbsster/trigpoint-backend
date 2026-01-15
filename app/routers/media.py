@@ -27,9 +27,9 @@ from app.image_processing import (
     detect_single_bike_bbox,
     crop_and_resize_webp,
     open_image_from_bytes,
-    auto_detect_rim_perspective_points,
+    auto_detect_rim_perspective_ellipses,
 )
-from app.schemas import PerspectivePoint
+from app.schemas import RimEllipse
 
 
 router = APIRouter(prefix="/bikes", tags=["media"])
@@ -51,11 +51,11 @@ class MediaOut(BaseModel):
 
 
 class HeroPerspectiveUpdate(BaseModel):
-    points: list[PerspectivePoint] = Field(default_factory=list)
+    ellipses: dict[str, RimEllipse] = Field(default_factory=dict)
 
 
 class HeroPerspectiveAutoOut(BaseModel):
-    points: list[PerspectivePoint] = Field(default_factory=list)
+    ellipses: dict[str, RimEllipse] = Field(default_factory=dict)
     warning: Optional[str] = None
 
 
@@ -217,7 +217,7 @@ async def upload_hero_image(
         "size_bytes": primary["size_bytes"],
         "role": "hero",
         "variants": variants,
-        "perspective_points": [],
+        "perspective_ellipses": {},
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -310,7 +310,7 @@ async def update_hero_perspective(
         raise HTTPException(status_code=404, detail="Hero media not found")
 
     update = {
-        "perspective_points": [p.dict() for p in payload.points],
+        "perspective_ellipses": {k: v.dict() for k, v in payload.ellipses.items()},
         "updated_at": datetime.utcnow(),
     }
     result = await media_items.update_one(
@@ -364,10 +364,10 @@ async def auto_detect_hero_perspective(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load hero image: {exc}")
 
-    points, warning = auto_detect_rim_perspective_points(image)
-    if points:
+    ellipses, warning = auto_detect_rim_perspective_ellipses(image)
+    if ellipses:
         update = {
-            "perspective_points": points,
+            "perspective_ellipses": ellipses,
             "updated_at": datetime.utcnow(),
         }
         await media_items.update_one(
@@ -375,14 +375,14 @@ async def auto_detect_hero_perspective(
             {"$set": update},
         )
 
-    parsed_points: list[PerspectivePoint] = []
-    for p in points:
+    parsed_ellipses: dict[str, RimEllipse] = {}
+    for key, raw in ellipses.items():
         try:
-            parsed_points.append(PerspectivePoint(**p))
+            parsed_ellipses[key] = RimEllipse(**raw)
         except Exception:
             continue
 
-    return HeroPerspectiveAutoOut(points=parsed_points, warning=warning)
+    return HeroPerspectiveAutoOut(ellipses=parsed_ellipses, warning=warning)
 
 
 # second router for serving media bytes via Cloud Run

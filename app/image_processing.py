@@ -336,25 +336,11 @@ def label_group(name: str) -> Optional[str]:
     return None
 
 
-def _ellipse_points(fit: EllipseFit, count: int = 4) -> list[tuple[float, float]]:
-    cx, cy = fit.center
-    a, b = fit.axes
-    angle = np.radians(fit.angle_deg)
-    cos_a = np.cos(angle)
-    sin_a = np.sin(angle)
-    points = []
-    for t in np.linspace(0.0, 2.0 * np.pi, count, endpoint=False):
-        x = cx + a * np.cos(t) * cos_a - b * np.sin(t) * sin_a
-        y = cy + a * np.cos(t) * sin_a + b * np.sin(t) * cos_a
-        points.append((float(x), float(y)))
-    return points
-
-
-def auto_detect_rim_perspective_points(
+def auto_detect_rim_perspective_ellipses(
     image: Image.Image,
     conf: float = 0.25,
     ellipse_method: str = "ransac-direct",
-) -> tuple[list[dict], Optional[str]]:
+) -> tuple[dict[str, dict], Optional[str]]:
     if YOLO is None:
         return [], "Wheel detection unavailable; missing ultralytics."
     if np is None or cv2 is None:
@@ -644,22 +630,20 @@ def auto_detect_rim_perspective_points(
         if best_fit is not None:
             fits_by_role[wheel_role] = best_fit
 
-    points_out: list[dict] = []
+    ellipses_out: dict[str, dict] = {}
     for role, fit in fits_by_role.items():
-        for idx, (x, y) in enumerate(_ellipse_points(fit, count=4), start=1):
-            points_out.append(
-                {
-                    "id": f"persp_auto_{role}_{idx}",
-                    "type": role,
-                    "x": float(x),
-                    "y": float(y),
-                }
-            )
+        ellipses_out[role] = {
+            "cx": float(fit.center[0]),
+            "cy": float(fit.center[1]),
+            "rx": float(fit.axes[0]),
+            "ry": float(fit.axes[1]),
+            "angle_deg": float(fit.angle_deg),
+        }
 
-    if not points_out:
-        return [], "No rim fits found."
+    if not ellipses_out:
+        return {}, "No rim fits found."
 
-    return points_out, None
+    return ellipses_out, None
 
 
 def detect_single_bike_bbox(image: Image.Image) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[str]]:
