@@ -9,3 +9,5 @@ google-cloud-storage
 python-multipart
 Pillow
 ultralytics
+numpy
+opencv-python

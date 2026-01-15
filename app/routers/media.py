@@ -27,6 +27,7 @@ from app.image_processing import (
     detect_single_bike_bbox,
     crop_and_resize_webp,
     open_image_from_bytes,
+    auto_detect_rim_perspective_points,
 )
 from app.schemas import PerspectivePoint
 
@@ -51,6 +52,11 @@ class MediaOut(BaseModel):
 
 class HeroPerspectiveUpdate(BaseModel):
     points: list[PerspectivePoint] = Field(default_factory=list)
+
+
+class HeroPerspectiveAutoOut(BaseModel):
+    points: list[PerspectivePoint] = Field(default_factory=list)
+    warning: Optional[str] = None
 
 
 def media_doc_to_out(doc, warning: Optional[str] = None) -> MediaOut:
@@ -316,6 +322,67 @@ async def update_hero_perspective(
         raise HTTPException(status_code=404, detail="Hero media not found")
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{bike_id}/media/hero/perspective/auto", response_model=HeroPerspectiveAutoOut)
+async def auto_detect_hero_perspective(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    bikes = bikes_col()
+    media_items = media_items_col()
+
+    try:
+        bike_oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bike = await bikes.find_one({"_id": bike_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    user_oid = _extract_user_oid(current_user)
+    if bike.get("user_id") != user_oid:
+        raise HTTPException(status_code=403, detail="Not your bike")
+
+    hero_id = bike.get("hero_media_id")
+    if not hero_id:
+        raise HTTPException(status_code=404, detail="Hero media not found")
+
+    media_doc = await media_items.find_one({"_id": hero_id, "bike_id": bike_oid})
+    if not media_doc:
+        raise HTTPException(status_code=404, detail="Hero media not found")
+
+    variants = media_doc.get("variants") or {}
+    preferred = variants.get("high") or variants.get("original") or {}
+    storage_key = preferred.get("storage_key") or media_doc.get("storage_key")
+    bucket_name = media_doc.get("bucket", DEFAULT_BUCKET)
+
+    try:
+        content = download_media(bucket_name, storage_key)
+        image = open_image_from_bytes(content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load hero image: {exc}")
+
+    points, warning = auto_detect_rim_perspective_points(image)
+    if points:
+        update = {
+            "perspective_points": points,
+            "updated_at": datetime.utcnow(),
+        }
+        await media_items.update_one(
+            {"_id": hero_id, "bike_id": bike_oid},
+            {"$set": update},
+        )
+
+    parsed_points: list[PerspectivePoint] = []
+    for p in points:
+        try:
+            parsed_points.append(PerspectivePoint(**p))
+        except Exception:
+            continue
+
+    return HeroPerspectiveAutoOut(points=parsed_points, warning=warning)
 
 
 # second router for serving media bytes via Cloud Run
