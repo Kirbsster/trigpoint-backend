@@ -105,7 +105,7 @@ class PerspectiveCorrection(BaseModel):
     status: Optional[str] = None                             # ok | warning | invalid
     version: int = 1
 
-ScaleSource = Literal["rear_center", "front_center", "wheelbase",]
+ScaleSource = Literal["rear_center", "front_center", "wheelbase", "shock_eye"]
 PerspectiveMode = Literal["off", "front", "both_ls"]
 
 class BikeGeometry(BaseModel):
