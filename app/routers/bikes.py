@@ -24,9 +24,8 @@ from app.schemas import (
     BikeGeometry,
     BikeKinematics,
     RimEllipse,
-    BikePageSettings,
+    BikePageSettingsPayload,
     BikePageSettingsOut,
-    BikePageSettingsUpdate,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
@@ -148,7 +147,13 @@ def _extract_user_oid(current_user) -> ObjectId:
 
 
 def _default_page_settings() -> dict:
-    return BikePageSettings().model_dump()
+    return {
+        "perspective_mode": "off",
+        "show_measurements": True,
+        "show_ellipses": True,
+        "front_wheel_size": "29",
+        "rear_wheel_size": "29",
+    }
 
 
 def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
@@ -157,9 +162,7 @@ def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
         user_id=str(doc["user_id"]),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
-        perspective_mode=doc.get("perspective_mode", "off"),
-        show_measurements=doc.get("show_measurements", True),
-        show_ellipses=doc.get("show_ellipses", True),
+        settings=doc.get("settings", {}),
     )
 
 
@@ -262,7 +265,7 @@ async def get_page_settings(
             "user_id": user_oid,
             "created_at": now,
             "updated_at": now,
-            **payload,
+            "settings": payload,
         }
         await settings_col.insert_one(doc)
 
@@ -272,7 +275,7 @@ async def get_page_settings(
 @router.put("/{bike_id}/page_settings", response_model=BikePageSettingsOut)
 async def update_page_settings(
     bike_id: str,
-    payload: BikePageSettingsUpdate,
+    payload: BikePageSettingsPayload,
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
@@ -287,26 +290,26 @@ async def update_page_settings(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     settings_col = bike_page_settings_col()
-    patch = payload.model_dump(exclude_unset=True)
+    patch = payload.settings or {}
     now = datetime.utcnow()
 
     doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
     if not doc:
         base = _default_page_settings()
+        base.update(patch)
         doc = {
             "bike_id": oid,
             "user_id": user_oid,
             "created_at": now,
             "updated_at": now,
-            **base,
-            **patch,
+            "settings": base,
         }
         await settings_col.insert_one(doc)
         return _page_settings_doc_to_out(doc)
 
     await settings_col.update_one(
         {"_id": doc["_id"]},
-        {"$set": {**patch, "updated_at": now}},
+        {"$set": {"settings": {**doc.get("settings", {}), **patch}, "updated_at": now}},
     )
     updated = await settings_col.find_one({"_id": doc["_id"]})
     return _page_settings_doc_to_out(updated)
