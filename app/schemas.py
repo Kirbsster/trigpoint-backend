@@ -112,6 +112,7 @@ class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
     front_center_mm: float | None = None
     wheelbase_mm: float | None = None
+    shock_eye_mm: float | None = None
     scale_mm_per_px: float | None = None
     scale_source: ScaleSource | None = None  # which measurement set the scale
     perspective: PerspectiveCorrection | None = None
