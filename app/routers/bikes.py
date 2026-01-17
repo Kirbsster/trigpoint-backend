@@ -467,7 +467,63 @@ async def update_bodies(
 def _find_point(points: list[dict], ptype: str):
     return next((p for p in points if p.get("type") == ptype), None)
 
-def _compute_scale_mm_per_px(points: list[dict], source: str, mm_value: float) -> float:
+def _resolve_shock_segment(points: list[dict], bodies: list[dict]) -> tuple[dict, dict] | None:
+    shock = next((b for b in bodies if b.get("type") == "shock"), None)
+    if not shock:
+        return None
+    ids = [pid for pid in (shock.get("point_ids") or []) if pid]
+    if len(ids) < 2:
+        return None
+    if len(ids) == 2:
+        p1 = next((p for p in points if p.get("id") == ids[0]), None)
+        p2 = next((p for p in points if p.get("id") == ids[1]), None)
+        if not p1 or not p2:
+            return None
+        return (p1, p2)
+
+    anchor = None
+    for pid in ids:
+        p = next((pt for pt in points if pt.get("id") == pid), None)
+        if not p:
+            continue
+        if p.get("type") in ("fixed", "bb", "bottom_bracket"):
+            anchor = p
+            break
+    if not anchor:
+        anchor = next((pt for pt in points if pt.get("id") == ids[0]), None)
+    if not anchor:
+        return None
+
+    ax = anchor.get("x")
+    ay = anchor.get("y")
+    if ax is None or ay is None:
+        return None
+
+    nearest = None
+    nearest_dist = math.inf
+    for pid in ids:
+        if pid == anchor.get("id"):
+            continue
+        p = next((pt for pt in points if pt.get("id") == pid), None)
+        if not p:
+            continue
+        dx = float(p.get("x", 0)) - float(ax)
+        dy = float(p.get("y", 0)) - float(ay)
+        d = math.hypot(dx, dy)
+        if d < nearest_dist:
+            nearest_dist = d
+            nearest = p
+    if not nearest:
+        return None
+    return (anchor, nearest)
+
+
+def _compute_scale_mm_per_px(
+    points: list[dict],
+    bodies: list[dict],
+    source: str,
+    mm_value: float,
+) -> float:
     if mm_value <= 0:
         raise HTTPException(status_code=400, detail="Measurement must be > 0")
 
@@ -490,6 +546,13 @@ def _compute_scale_mm_per_px(points: list[dict], source: str, mm_value: float) -
         b = _find_point(points, "front_axle")
         if not a or not b:
             raise HTTPException(status_code=400, detail="Cannot compute scale: need rear_axle and front_axle points")
+        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+
+    elif source == "shock_eye":
+        seg = _resolve_shock_segment(points, bodies or [])
+        if not seg:
+            raise HTTPException(status_code=400, detail="Cannot compute scale: need shock body points")
+        a, b = seg
         d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
 
     else:
@@ -536,7 +599,8 @@ async def update_geometry(
             )
 
         points = bike.get("points", []) or []
-        scale = _compute_scale_mm_per_px(points, src, float(mm_value))
+        bodies = bike.get("bodies", []) or []
+        scale = _compute_scale_mm_per_px(points, bodies, src, float(mm_value))
 
         patch["scale_mm_per_px"] = scale
         patch["scale_source"] = src  # ensure stored
