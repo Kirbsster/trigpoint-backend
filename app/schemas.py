@@ -106,6 +106,7 @@ class PerspectiveCorrection(BaseModel):
     version: int = 1
 
 ScaleSource = Literal["rear_center", "front_center", "wheelbase",]
+PerspectiveMode = Literal["off", "front", "both_ls"]
 
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
@@ -166,5 +167,24 @@ class BikeOut(BaseModel):
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None
     kinematics: Optional[BikeKinematics] = None
+
+
+class BikePageSettings(BaseModel):
+    perspective_mode: PerspectiveMode = "off"
+    show_measurements: bool = True
+    show_ellipses: bool = True
+
+
+class BikePageSettingsOut(BikePageSettings):
+    bike_id: str
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BikePageSettingsUpdate(BaseModel):
+    perspective_mode: Optional[PerspectiveMode] = None
+    show_measurements: Optional[bool] = None
+    show_ellipses: Optional[bool] = None
 
     

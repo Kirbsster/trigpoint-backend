@@ -24,10 +24,13 @@ from app.schemas import (
     BikeGeometry,
     BikeKinematics,
     RimEllipse,
+    BikePageSettings,
+    BikePageSettingsOut,
+    BikePageSettingsUpdate,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
 
-from app.db import bikes_col, media_items_col
+from app.db import bikes_col, media_items_col, bike_page_settings_col
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
@@ -144,6 +147,22 @@ def _extract_user_oid(current_user) -> ObjectId:
     return raw_id
 
 
+def _default_page_settings() -> dict:
+    return BikePageSettings().model_dump()
+
+
+def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
+    return BikePageSettingsOut(
+        bike_id=str(doc["bike_id"]),
+        user_id=str(doc["user_id"]),
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"],
+        perspective_mode=doc.get("perspective_mode", "off"),
+        show_measurements=doc.get("show_measurements", True),
+        show_ellipses=doc.get("show_ellipses", True),
+    )
+
+
 @router.post("", response_model=BikeOut, status_code=status.HTTP_201_CREATED)
 async def create_bike(
     bike_in: BikeCreate,
@@ -215,6 +234,82 @@ async def get_bike(
         hero_thumb_url=hero_thumb_url,
         hero_perspective_ellipses=hero_perspective_ellipses,
     )
+
+
+@router.get("/{bike_id}/page_settings", response_model=BikePageSettingsOut)
+async def get_page_settings(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    settings_col = bike_page_settings_col()
+    doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
+    if not doc:
+        now = datetime.utcnow()
+        payload = _default_page_settings()
+        doc = {
+            "bike_id": oid,
+            "user_id": user_oid,
+            "created_at": now,
+            "updated_at": now,
+            **payload,
+        }
+        await settings_col.insert_one(doc)
+
+    return _page_settings_doc_to_out(doc)
+
+
+@router.put("/{bike_id}/page_settings", response_model=BikePageSettingsOut)
+async def update_page_settings(
+    bike_id: str,
+    payload: BikePageSettingsUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not bike:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    settings_col = bike_page_settings_col()
+    patch = payload.model_dump(exclude_unset=True)
+    now = datetime.utcnow()
+
+    doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
+    if not doc:
+        base = _default_page_settings()
+        doc = {
+            "bike_id": oid,
+            "user_id": user_oid,
+            "created_at": now,
+            "updated_at": now,
+            **base,
+            **patch,
+        }
+        await settings_col.insert_one(doc)
+        return _page_settings_doc_to_out(doc)
+
+    await settings_col.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {**patch, "updated_at": now}},
+    )
+    updated = await settings_col.find_one({"_id": doc["_id"]})
+    return _page_settings_doc_to_out(updated)
 
 def _ensure_unique_point_ids(points: list[BikePoint]) -> None:
     ids = [p.id for p in points if p.id]

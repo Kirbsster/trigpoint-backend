@@ -41,6 +41,9 @@ def bikes_col():
 def media_items_col():
     return get_db()["media_items"]
 
+def bike_page_settings_col():
+    return get_db()["bike_page_settings"]
+
 def sheds_col():
     return get_db()["sheds"]
 
@@ -100,4 +103,10 @@ async def ensure_indexes():
         unique=True,
         sparse=True,
         name="uniq_shed_slug",
+    )
+    settings = bike_page_settings_col()
+    await settings.create_index(
+        [("user_id", 1), ("bike_id", 1)],
+        unique=True,
+        name="uniq_user_bike_settings",
     )
