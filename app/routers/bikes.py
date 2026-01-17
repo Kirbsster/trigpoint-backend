@@ -28,12 +28,14 @@ from app.schemas import (
     BikePageSettingsOut,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
+from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
 from app.db import bikes_col, media_items_col, bike_page_settings_col
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url, resolve_hero_variant_url
+from app.settings import settings
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
@@ -799,6 +801,59 @@ async def compute_bike_kinematics(
     if not points:
         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
 
+    settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
+    settings = settings_doc.get("settings") if settings_doc else {}
+    if not isinstance(settings, dict):
+        settings = {}
+    perspective_mode = settings.get("perspective_mode", "off")
+    settings_found = settings_doc is not None
+
+    H = None
+    H_inv = None
+    rectify = None
+    homography_applied = False
+    ellipses_found = False
+    media_doc_found = False
+    ellipses_keys: list[str] = []
+    if perspective_mode != "off":
+        hero_id = doc.get("hero_media_id")
+        if hero_id:
+            media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
+            media_doc_found = media_doc is not None
+            ellipses = media_doc.get("perspective_ellipses") if media_doc else None
+            rear_ellipse = ellipses.get("rear") if isinstance(ellipses, dict) else None
+            front_ellipse = ellipses.get("front") if isinstance(ellipses, dict) else None
+            ellipses_found = bool(rear_ellipse or front_ellipse)
+            if isinstance(ellipses, dict):
+                ellipses_keys = list(ellipses.keys())
+            homography = compute_homography_from_ellipses(
+                rear_ellipse,
+                front_ellipse,
+                perspective_mode,
+            )
+            if homography:
+                H = homography["H"]
+                H_inv = homography["H_inv"]
+                rectify = homography.get("rectify")
+
+    if H is not None:
+        rectified_points: List[BikePoint] = []
+        scale = rectify.get("scale") if isinstance(rectify, dict) else None
+        tx = rectify.get("tx") if isinstance(rectify, dict) else None
+        ty = rectify.get("ty") if isinstance(rectify, dict) else None
+        for p in points:
+            mapped = apply_homography(H, p.x, p.y)
+            if not mapped:
+                rectified_points.append(p)
+                continue
+            x, y = mapped
+            if scale and tx is not None and ty is not None:
+                x = x * scale + tx
+                y = y * scale + ty
+            rectified_points.append(p.copy(update={"x": x, "y": y}))
+        points = rectified_points
+        homography_applied = True
+
     # ---- Extract / validate bodies ----
     raw_bodies = doc.get("bodies") or []
     bodies: List[RigidBody] = []
@@ -876,6 +931,13 @@ async def compute_bike_kinematics(
     coords_map: dict[str, list[dict]] = {}
     for step in solver_steps:
         for pid, (x, y) in step.points.items():
+            if H_inv is not None and scale and tx is not None and ty is not None:
+                rx = (float(x) - tx) / scale
+                ry = (float(y) - ty) / scale
+                mapped = apply_homography(H_inv, rx, ry)
+                if mapped:
+                    coords_map.setdefault(pid, []).append({"x": mapped[0], "y": mapped[1]})
+                    continue
             coords_map.setdefault(pid, []).append({"x": float(x), "y": float(y)})
 
     # Rebuild points with coords attached (coords are image pixels)
@@ -927,7 +989,61 @@ async def compute_bike_kinematics(
 
     # Front-end gets the scaled result (mm stroke/travel, px coords)
     result.steps = solver_steps
+    result.debug = {
+        "perspective_mode": perspective_mode,
+        "settings_found": settings_found,
+        "ellipses_found": ellipses_found,
+        "ellipses_keys": ellipses_keys,
+        "media_doc_found": media_doc_found,
+        "hero_media_id": str(doc.get("hero_media_id")) if doc.get("hero_media_id") else None,
+        "homography_applied": homography_applied,
+        "rectify": rectify,
+        "scale_mm_per_px": scale_mm_per_px,
+        "point_count": len(points),
+        "body_count": len(bodies),
+    }
     return result
+
+
+@router.get("/{bike_id}/debug")
+async def debug_bike(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    hero_id = doc.get("hero_media_id")
+    media_doc = None
+    if hero_id:
+        media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
+
+    settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
+    settings_payload = settings_doc.get("settings") if settings_doc else None
+
+    return {
+        "db_name": settings.mongodb_db_name,
+        "bike_id": str(doc["_id"]),
+        "user_id": str(doc.get("user_id")),
+        "hero_media_id": str(hero_id) if hero_id else None,
+        "points_count": len(doc.get("points") or []),
+        "bodies_count": len(doc.get("bodies") or []),
+        "geometry_keys": sorted(list((doc.get("geometry") or {}).keys())),
+        "page_settings_found": bool(settings_doc),
+        "page_settings_keys": sorted(list(settings_payload.keys())) if isinstance(settings_payload, dict) else [],
+        "media_doc_found": bool(media_doc),
+        "media_ellipses_keys": sorted(list((media_doc.get("perspective_ellipses") or {}).keys()))
+        if isinstance(media_doc, dict)
+        else [],
+    }
 
 
 @router.get("/{bike_id}/kinematics_cached", response_model=BikeKinematics)
