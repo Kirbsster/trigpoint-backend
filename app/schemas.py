@@ -106,7 +106,7 @@ class PerspectiveCorrection(BaseModel):
     version: int = 1
 
 ScaleSource = Literal["rear_center", "front_center", "wheelbase", "shock_eye"]
-PerspectiveMode = Literal["off", "front", "both_ls"]
+PerspectiveMode = Literal["off", "front", "rear", "both_ls"]
 
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
@@ -164,6 +164,7 @@ class BikeOut(BaseModel):
     hero_url: Optional[str] = None
     hero_thumb_url: Optional[str] = None
     hero_perspective_ellipses: Optional[Dict[str, RimEllipse]] = None
+    hero_detection_boxes: Optional[dict] = None
     points: Optional[List[BikePoint]] = None
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None

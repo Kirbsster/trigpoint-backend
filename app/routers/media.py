@@ -47,6 +47,7 @@ class MediaOut(BaseModel):
     role: str
     created_at: datetime
     variants: Optional[dict] = None
+    detection_boxes: Optional[dict] = None
     warning: Optional[str] = None
 
 
@@ -71,6 +72,7 @@ def media_doc_to_out(doc, warning: Optional[str] = None) -> MediaOut:
         role=doc.get("role", "hero"),
         created_at=doc["created_at"],
         variants=doc.get("variants"),
+        detection_boxes=doc.get("detection_boxes"),
         warning=warning,
     )
 
@@ -141,6 +143,7 @@ async def upload_hero_image(
     hero_prefix = f"{base_prefix}/hero_"
 
     warning: Optional[str] = None
+    detection_boxes: dict[str, dict] = {}
     processed = {}
 
     try:
@@ -150,6 +153,13 @@ async def upload_hero_image(
             processed["low"] = crop_and_resize_webp(image, bbox, long_edge_px=150)
             processed["med"] = crop_and_resize_webp(image, bbox, long_edge_px=450)
             processed["high"] = crop_and_resize_webp(image, bbox, long_edge_px=None)
+            x1, y1, x2, y2 = bbox
+            detection_boxes["bike"] = {
+                "x1": float(x1),
+                "y1": float(y1),
+                "x2": float(x2),
+                "y2": float(y2),
+            }
     except Exception as exc:
         warning = f"Image processing failed; saved original image. ({exc})"
 
@@ -218,6 +228,7 @@ async def upload_hero_image(
         "role": "hero",
         "variants": variants,
         "perspective_ellipses": {},
+        "detection_boxes": detection_boxes,
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -364,12 +375,15 @@ async def auto_detect_hero_perspective(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load hero image: {exc}")
 
-    ellipses, warning = auto_detect_rim_perspective_ellipses(image)
-    if ellipses:
-        update = {
-            "perspective_ellipses": ellipses,
-            "updated_at": datetime.utcnow(),
-        }
+    ellipses, warning, boxes = auto_detect_rim_perspective_ellipses(image)
+    if ellipses or boxes:
+        update = {"updated_at": datetime.utcnow()}
+        if ellipses:
+            update["perspective_ellipses"] = ellipses
+        if boxes:
+            merged = dict(media_doc.get("detection_boxes") or {})
+            merged.update(boxes)
+            update["detection_boxes"] = merged
         await media_items.update_one(
             {"_id": hero_id, "bike_id": bike_oid},
             {"$set": update},

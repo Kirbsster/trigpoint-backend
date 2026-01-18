@@ -340,15 +340,15 @@ def auto_detect_rim_perspective_ellipses(
     image: Image.Image,
     conf: float = 0.25,
     ellipse_method: str = "ransac-direct",
-) -> tuple[dict[str, dict], Optional[str]]:
+) -> tuple[dict[str, dict], Optional[str], dict[str, dict]]:
     if YOLO is None:
-        return [], "Wheel detection unavailable; missing ultralytics."
+        return {}, "Wheel detection unavailable; missing ultralytics.", {}
     if np is None or cv2 is None:
-        return [], "Wheel detection unavailable; missing numpy or opencv."
+        return {}, "Wheel detection unavailable; missing numpy or opencv.", {}
 
     model = _load_wheel_fork_model()
     if model is None:
-        return [], "Wheel detection unavailable; missing wheel/fork model."
+        return {}, "Wheel detection unavailable; missing wheel/fork model.", {}
 
     if torch is not None:
         try:
@@ -358,20 +358,19 @@ def auto_detect_rim_perspective_ellipses(
 
     result_list = model(image, conf=conf, verbose=False)
     if not result_list:
-        return [], "No detections from wheel/fork model."
+        return {}, "No detections from wheel/fork model.", {}
     result = result_list[0]
 
     if not hasattr(result, "boxes") or result.boxes is None or len(result.boxes) == 0:
-        return [], "No wheel detections."
+        return {}, "No wheel detections.", {}
 
     names = result.names
     cls_ids = result.boxes.cls.cpu().numpy().astype(int)
     confs = result.boxes.conf.cpu().numpy()
     xyxy = result.boxes.xyxy.cpu().numpy()
 
-    wheel_boxes: list[tuple[float, float, float, float]] = []
     wheel_detections: list[tuple[float, float, float, float, float, str]] = []
-    fork_boxes: list[tuple[float, float, float, float]] = []
+    fork_detections: list[tuple[float, float, float, float, float, str]] = []
 
     for cls_id, confv, box in zip(cls_ids, confs, xyxy):
         label = names.get(cls_id, "")
@@ -380,13 +379,12 @@ def auto_detect_rim_perspective_ellipses(
             continue
         x1, y1, x2, y2 = map(float, box)
         if group == "wheel":
-            wheel_boxes.append((x1, y1, x2, y2))
             wheel_detections.append((x1, y1, x2, y2, float(confv), label))
         elif group == "fork":
-            fork_boxes.append((x1, y1, x2, y2))
+            fork_detections.append((x1, y1, x2, y2, float(confv), label))
 
     if not wheel_detections:
-        return [], "No wheel detections."
+        return {}, "No wheel detections.", {}
 
     gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, EDGE_CANNY_LOW, EDGE_CANNY_HIGH)
@@ -551,7 +549,7 @@ def auto_detect_rim_perspective_ellipses(
         return rim, fit, score
 
     fork_centers = []
-    for fx1, fy1, fx2, fy2 in fork_boxes:
+    for fx1, fy1, fx2, fy2, _, _ in fork_detections:
         fork_centers.append(((fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5))
 
     front_idx = None
@@ -630,6 +628,61 @@ def auto_detect_rim_perspective_ellipses(
         if best_fit is not None:
             fits_by_role[wheel_role] = best_fit
 
+    boxes_out: dict[str, dict] = {}
+    if front_idx is not None:
+        fx1, fy1, fx2, fy2, fconf, _ = wheel_detections[front_idx]
+        boxes_out["front_wheel"] = {
+            "x1": float(fx1),
+            "y1": float(fy1),
+            "x2": float(fx2),
+            "y2": float(fy2),
+            "conf": float(fconf),
+        }
+        if len(wheel_detections) > 1:
+            rear_idx = None
+            if len(wheel_detections) == 2:
+                rear_idx = 1 - front_idx
+            if rear_idx is not None:
+                rx1, ry1, rx2, ry2, rconf, _ = wheel_detections[rear_idx]
+                boxes_out["rear_wheel"] = {
+                    "x1": float(rx1),
+                    "y1": float(ry1),
+                    "x2": float(rx2),
+                    "y2": float(ry2),
+                    "conf": float(rconf),
+                }
+    elif len(wheel_detections) == 2:
+        centers = [(((wx1 + wx2) * 0.5), i) for i, (wx1, wy1, wx2, wy2, _, _) in enumerate(wheel_detections)]
+        centers.sort(key=lambda item: item[0])
+        rear_idx = centers[0][1]
+        front_idx_guess = centers[1][1]
+        rx1, ry1, rx2, ry2, rconf, _ = wheel_detections[rear_idx]
+        fx1, fy1, fx2, fy2, fconf, _ = wheel_detections[front_idx_guess]
+        boxes_out["rear_wheel"] = {
+            "x1": float(rx1),
+            "y1": float(ry1),
+            "x2": float(rx2),
+            "y2": float(ry2),
+            "conf": float(rconf),
+        }
+        boxes_out["front_wheel"] = {
+            "x1": float(fx1),
+            "y1": float(fy1),
+            "x2": float(fx2),
+            "y2": float(fy2),
+            "conf": float(fconf),
+        }
+
+    if fork_detections:
+        fx1, fy1, fx2, fy2, fconf, _ = max(fork_detections, key=lambda d: d[4])
+        boxes_out["fork"] = {
+            "x1": float(fx1),
+            "y1": float(fy1),
+            "x2": float(fx2),
+            "y2": float(fy2),
+            "conf": float(fconf),
+        }
+
     ellipses_out: dict[str, dict] = {}
     for role, fit in fits_by_role.items():
         ellipses_out[role] = {
@@ -641,9 +694,9 @@ def auto_detect_rim_perspective_ellipses(
         }
 
     if not ellipses_out:
-        return {}, "No rim fits found."
+        return {}, "No rim fits found.", boxes_out
 
-    return ellipses_out, None
+    return ellipses_out, None, boxes_out
 
 
 def detect_single_bike_bbox(image: Image.Image) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[str]]:

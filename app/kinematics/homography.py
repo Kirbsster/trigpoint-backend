@@ -131,6 +131,8 @@ def compute_homography_from_ellipses(
 ) -> Optional[dict]:
     if mode == "front":
         rear_ellipse = None
+    if mode == "rear":
+        front_ellipse = None
     if not rear_ellipse and not front_ellipse:
         return None
 

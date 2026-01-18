@@ -44,6 +44,7 @@ def bike_doc_to_out(
     hero_url: Optional[str] = None,
     hero_thumb_url: Optional[str] = None,
     hero_perspective_ellipses: Optional[dict] = None,
+    hero_detection_boxes: Optional[dict] = None,
 ) -> BikeOut:
     # normalise points if present
     raw_points = doc.get("points") or []
@@ -112,6 +113,7 @@ def bike_doc_to_out(
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
         hero_thumb_url=hero_thumb_url if hero_thumb_url is not None else doc.get("hero_thumb_url"),
         hero_perspective_ellipses=perspective_ellipses or None,
+        hero_detection_boxes=hero_detection_boxes,
         points=points or None,
         bodies=bodies or None,
         geometry=geometry,
@@ -227,10 +229,12 @@ async def get_bike(
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_perspective_ellipses = None
+    hero_detection_boxes = None
     if hero_id:
         media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
         if media_doc:
             hero_perspective_ellipses = media_doc.get("perspective_ellipses")
+            hero_detection_boxes = media_doc.get("detection_boxes")
 
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
     return bike_doc_to_out(
@@ -238,6 +242,7 @@ async def get_bike(
         hero_url=hero_url,
         hero_thumb_url=hero_thumb_url,
         hero_perspective_ellipses=hero_perspective_ellipses,
+        hero_detection_boxes=hero_detection_boxes,
     )
 
 
