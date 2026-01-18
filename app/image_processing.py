@@ -336,6 +336,115 @@ def label_group(name: str) -> Optional[str]:
     return None
 
 
+def detect_wheel_fork_boxes(
+    image: Image.Image,
+    conf: float = 0.25,
+) -> tuple[dict[str, dict], Optional[bool], Optional[str]]:
+    if YOLO is None:
+        return {}, None, "Wheel/fork detection unavailable; missing ultralytics."
+    if np is None or cv2 is None:
+        return {}, None, "Wheel/fork detection unavailable; missing numpy or opencv."
+
+    model = _load_wheel_fork_model()
+    if model is None:
+        return {}, None, "Wheel/fork detection unavailable; missing wheel/fork model."
+
+    if torch is not None:
+        try:
+            torch.backends.nnpack.enabled = False
+        except Exception:
+            pass
+
+    result_list = model(image, conf=conf, verbose=False)
+    if not result_list:
+        return {}, None, "No detections from wheel/fork model."
+    result = result_list[0]
+
+    if not hasattr(result, "boxes") or result.boxes is None or len(result.boxes) == 0:
+        return {}, None, "No wheel/fork detections."
+
+    names = result.names
+    cls_ids = result.boxes.cls.cpu().numpy().astype(int)
+    confs = result.boxes.conf.cpu().numpy()
+    xyxy = result.boxes.xyxy.cpu().numpy()
+
+    wheel_detections: list[tuple[float, float, float, float, float, str]] = []
+    fork_detections: list[tuple[float, float, float, float, float, str]] = []
+
+    for cls_id, confv, box in zip(cls_ids, confs, xyxy):
+        label = names.get(cls_id, "")
+        group = label_group(label)
+        if group is None:
+            continue
+        x1, y1, x2, y2 = map(float, box)
+        if group == "wheel":
+            wheel_detections.append((x1, y1, x2, y2, float(confv), label))
+        elif group == "fork":
+            fork_detections.append((x1, y1, x2, y2, float(confv), label))
+
+    if not wheel_detections:
+        return {}, None, "No wheel detections."
+
+    front_idx = None
+    fork_centers = []
+    for fx1, fy1, fx2, fy2, _, _ in fork_detections:
+        fork_centers.append(((fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5))
+
+    if fork_centers:
+        best = None
+        for idx, (x1, y1, x2, y2, confv, label) in enumerate(wheel_detections):
+            cx = (x1 + x2) * 0.5
+            cy = (y1 + y2) * 0.5
+            dist = min((cx - fx) ** 2 + (cy - fy) ** 2 for fx, fy in fork_centers)
+            if best is None or dist < best[0]:
+                best = (dist, idx)
+        front_idx = best[1] if best is not None else None
+    elif len(wheel_detections) == 2:
+        centers = [(((wx1 + wx2) * 0.5), i) for i, (wx1, wy1, wx2, wy2, _, _) in enumerate(wheel_detections)]
+        centers.sort(key=lambda item: item[0])
+        front_idx = centers[1][1]
+
+    boxes_out: dict[str, dict] = {}
+    bike_faces_right: Optional[bool] = None
+    if front_idx is not None:
+        fx1, fy1, fx2, fy2, fconf, _ = wheel_detections[front_idx]
+        boxes_out["front_wheel"] = {
+            "x1": float(fx1),
+            "y1": float(fy1),
+            "x2": float(fx2),
+            "y2": float(fy2),
+            "conf": float(fconf),
+        }
+        if len(wheel_detections) > 1:
+            rear_idx = None
+            if len(wheel_detections) == 2:
+                rear_idx = 1 - front_idx
+            if rear_idx is not None:
+                rx1, ry1, rx2, ry2, rconf, _ = wheel_detections[rear_idx]
+                boxes_out["rear_wheel"] = {
+                    "x1": float(rx1),
+                    "y1": float(ry1),
+                    "x2": float(rx2),
+                    "y2": float(ry2),
+                    "conf": float(rconf),
+                }
+                front_cx = (fx1 + fx2) * 0.5
+                rear_cx = (rx1 + rx2) * 0.5
+                bike_faces_right = front_cx > rear_cx
+
+    if fork_detections:
+        fx1, fy1, fx2, fy2, fconf, _ = max(fork_detections, key=lambda d: d[4])
+        boxes_out["fork"] = {
+            "x1": float(fx1),
+            "y1": float(fy1),
+            "x2": float(fx2),
+            "y2": float(fy2),
+            "conf": float(fconf),
+        }
+
+    return boxes_out, bike_faces_right, None
+
+
 def auto_detect_rim_perspective_ellipses(
     image: Image.Image,
     conf: float = 0.25,

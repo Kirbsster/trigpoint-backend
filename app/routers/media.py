@@ -14,6 +14,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from bson import ObjectId
 import os
+from PIL import Image
 
 from app.db import bikes_col, media_items_col
 from app.routers.auth import get_current_user
@@ -28,6 +29,7 @@ from app.image_processing import (
     crop_and_resize_webp,
     open_image_from_bytes,
     auto_detect_rim_perspective_ellipses,
+    detect_wheel_fork_boxes,
 )
 from app.schemas import RimEllipse
 
@@ -148,6 +150,22 @@ async def upload_hero_image(
 
     try:
         image = open_image_from_bytes(original_content)
+        boxes, faces_right, wheel_warn = detect_wheel_fork_boxes(image)
+        if boxes:
+            detection_boxes.update(boxes)
+
+        if faces_right is False:
+            image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            width = image.width
+            for key, box in list(detection_boxes.items()):
+                x1 = float(box["x1"])
+                x2 = float(box["x2"])
+                detection_boxes[key] = {
+                    **box,
+                    "x1": float(width - x2),
+                    "x2": float(width - x1),
+                }
+
         bbox, warning = detect_single_bike_bbox(image)
         if bbox:
             processed["low"] = crop_and_resize_webp(image, bbox, long_edge_px=150)
@@ -160,6 +178,8 @@ async def upload_hero_image(
                 "x2": float(x2),
                 "y2": float(y2),
             }
+        if warning is None:
+            warning = wheel_warn
     except Exception as exc:
         warning = f"Image processing failed; saved original image. ({exc})"
 

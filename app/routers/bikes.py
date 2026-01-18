@@ -155,6 +155,7 @@ def _default_page_settings() -> dict:
         "perspective_mode": "off",
         "show_measurements": True,
         "show_ellipses": True,
+        "show_detection_boxes": False,
         "front_wheel_size": "29",
         "rear_wheel_size": "29",
     }
