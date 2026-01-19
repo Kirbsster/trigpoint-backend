@@ -986,24 +986,30 @@ async def compute_bike_kinematics(
     # 1) Scale stroke / length / travel to mm, keep coords in px
     # --------------------------------------------------------
     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
-    scale = scale_mm_per_px  # mm per px
+    scale_mm = scale_mm_per_px  # mm per px
 
     for s in solver_steps:
         # These came out of the solver in px
-        s.shock_stroke = s.shock_stroke * scale      # → mm
-        s.shock_length = s.shock_length * scale      # → mm
+        s.shock_stroke = s.shock_stroke * scale_mm   # → mm
+        s.shock_length = s.shock_length * scale_mm   # → mm
         if s.rear_travel is not None:
-            s.rear_travel = s.rear_travel * scale    # → mm
+            s.rear_travel = s.rear_travel * scale_mm # → mm
 
     # --------------------------------------------------------
     # 2) Build coords per point_id: coords[i] = (x,y) at step i (STILL px)
     # --------------------------------------------------------
     coords_map: dict[str, list[dict]] = {}
+    rectify_scale = None
+    if isinstance(rectify, dict) and rectify.get("scale") is not None:
+        try:
+            rectify_scale = float(rectify.get("scale"))
+        except Exception:
+            rectify_scale = None
     for step in solver_steps:
         for pid, (x, y) in step.points.items():
-            if H_inv is not None and scale and tx is not None and ty is not None:
-                rx = (float(x) - tx) / scale
-                ry = (float(y) - ty) / scale
+            if H_inv is not None and rectify_scale and tx is not None and ty is not None:
+                rx = (float(x) - tx) / rectify_scale
+                ry = (float(y) - ty) / rectify_scale
                 mapped = apply_homography(H_inv, rx, ry)
                 if mapped:
                     coords_map.setdefault(pid, []).append({"x": mapped[0], "y": mapped[1]})
@@ -1059,6 +1065,36 @@ async def compute_bike_kinematics(
 
     # Front-end gets the scaled result (mm stroke/travel, px coords)
     result.steps = solver_steps
+    rear_axle_steps = []
+    if result.rear_axle_point_id:
+        rear_coords = coords_map.get(result.rear_axle_point_id, [])
+        for idx, coord in enumerate(rear_coords):
+            raw_x = float(coord.get("x", 0.0))
+            raw_y = float(coord.get("y", 0.0))
+            scaled = None
+            rectified = None
+            if H is not None:
+                mapped = apply_homography(H, raw_x, raw_y)
+                if mapped:
+                    scaled = {"x": mapped[0], "y": mapped[1]}
+                    if (
+                        isinstance(rectify, dict)
+                        and rectify.get("scale") is not None
+                        and rectify.get("tx") is not None
+                        and rectify.get("ty") is not None
+                    ):
+                        rectified = {
+                            "x": mapped[0] * float(rectify["scale"]) + float(rectify["tx"]),
+                            "y": mapped[1] * float(rectify["scale"]) + float(rectify["ty"]),
+                        }
+            rear_axle_steps.append(
+                {
+                    "step_index": idx,
+                    "raw": {"x": raw_x, "y": raw_y},
+                    "scaled": scaled,
+                    "rectified": rectified,
+                }
+            )
     result.debug = {
         "perspective_mode": perspective_mode,
         "settings_found": settings_found,
@@ -1071,6 +1107,7 @@ async def compute_bike_kinematics(
         "scale_mm_per_px": scale_mm_per_px,
         "point_count": len(points),
         "body_count": len(bodies),
+        "rear_axle_steps": rear_axle_steps,
     }
     return result
 
