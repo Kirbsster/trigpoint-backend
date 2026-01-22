@@ -471,7 +471,12 @@ async def update_bodies(
 # - BikeGeometry, BikeOut
 
 def _find_point(points: list[dict], ptype: str):
-    return next((p for p in points if p.get("type") == ptype), None)
+    def _point_type(point):
+        if isinstance(point, dict):
+            return point.get("type")
+        return getattr(point, "type", None)
+
+    return next((p for p in points if _point_type(p) == ptype), None)
 
 def _resolve_shock_segment(points: list[dict], bodies: list[dict]) -> tuple[dict, dict] | None:
     def _body_type(body):
@@ -488,41 +493,52 @@ def _resolve_shock_segment(points: list[dict], bodies: list[dict]) -> tuple[dict
         ids = [pid for pid in (getattr(shock, "point_ids", None) or []) if pid]
     if len(ids) < 2:
         return None
+    def _point_id(point):
+        if isinstance(point, dict):
+            return point.get("id")
+        return getattr(point, "id", None)
+
+    def _point_coords(point):
+        if isinstance(point, dict):
+            return point.get("x"), point.get("y")
+        return getattr(point, "x", None), getattr(point, "y", None)
+
     if len(ids) == 2:
-        p1 = next((p for p in points if p.get("id") == ids[0]), None)
-        p2 = next((p for p in points if p.get("id") == ids[1]), None)
+        p1 = next((p for p in points if _point_id(p) == ids[0]), None)
+        p2 = next((p for p in points if _point_id(p) == ids[1]), None)
         if not p1 or not p2:
             return None
         return (p1, p2)
 
     anchor = None
     for pid in ids:
-        p = next((pt for pt in points if pt.get("id") == pid), None)
+        p = next((pt for pt in points if _point_id(pt) == pid), None)
         if not p:
             continue
-        if p.get("type") in ("fixed", "bb", "bottom_bracket"):
+        ptype = p.get("type") if isinstance(p, dict) else getattr(p, "type", None)
+        if ptype in ("fixed", "bb", "bottom_bracket"):
             anchor = p
             break
     if not anchor:
-        anchor = next((pt for pt in points if pt.get("id") == ids[0]), None)
+        anchor = next((pt for pt in points if _point_id(pt) == ids[0]), None)
     if not anchor:
         return None
 
-    ax = anchor.get("x")
-    ay = anchor.get("y")
+    ax, ay = _point_coords(anchor)
     if ax is None or ay is None:
         return None
 
     nearest = None
     nearest_dist = math.inf
     for pid in ids:
-        if pid == anchor.get("id"):
+        if pid == _point_id(anchor):
             continue
-        p = next((pt for pt in points if pt.get("id") == pid), None)
+        p = next((pt for pt in points if _point_id(pt) == pid), None)
         if not p:
             continue
-        dx = float(p.get("x", 0)) - float(ax)
-        dy = float(p.get("y", 0)) - float(ay)
+        px, py = _point_coords(p)
+        dx = float(px or 0) - float(ax)
+        dy = float(py or 0) - float(ay)
         d = math.hypot(dx, dy)
         if d < nearest_dist:
             nearest_dist = d
@@ -538,6 +554,11 @@ def _compute_scale_mm_per_px(
     source: str,
     mm_value: float,
 ) -> float:
+    def _point_coords(point):
+        if isinstance(point, dict):
+            return point.get("x"), point.get("y")
+        return getattr(point, "x", None), getattr(point, "y", None)
+
     if mm_value <= 0:
         raise HTTPException(status_code=400, detail="Measurement must be > 0")
 
@@ -546,28 +567,36 @@ def _compute_scale_mm_per_px(
         b = _find_point(points, "rear_axle")
         if not a or not b:
             raise HTTPException(status_code=400, detail="Cannot compute scale: need bb and rear_axle points")
-        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        ax, ay = _point_coords(a)
+        bx, by = _point_coords(b)
+        d_px = math.hypot(float(bx) - float(ax), float(by) - float(ay))
 
     elif source == "front_center":
         a = _find_point(points, "bb") or _find_point(points, "bottom_bracket")
         b = _find_point(points, "front_axle")
         if not a or not b:
             raise HTTPException(status_code=400, detail="Cannot compute scale: need bb and front_axle points")
-        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        ax, ay = _point_coords(a)
+        bx, by = _point_coords(b)
+        d_px = math.hypot(float(bx) - float(ax), float(by) - float(ay))
 
     elif source == "wheelbase":
         a = _find_point(points, "rear_axle")
         b = _find_point(points, "front_axle")
         if not a or not b:
             raise HTTPException(status_code=400, detail="Cannot compute scale: need rear_axle and front_axle points")
-        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        ax, ay = _point_coords(a)
+        bx, by = _point_coords(b)
+        d_px = math.hypot(float(bx) - float(ax), float(by) - float(ay))
 
     elif source == "shock_eye":
         seg = _resolve_shock_segment(points, bodies or [])
         if not seg:
             raise HTTPException(status_code=400, detail="Cannot compute scale: need shock body points")
         a, b = seg
-        d_px = math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        ax, ay = _point_coords(a)
+        bx, by = _point_coords(b)
+        d_px = math.hypot(float(bx) - float(ax), float(by) - float(ay))
 
     else:
         raise HTTPException(status_code=400, detail="Unknown scale_source")
