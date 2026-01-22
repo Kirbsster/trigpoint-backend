@@ -474,10 +474,18 @@ def _find_point(points: list[dict], ptype: str):
     return next((p for p in points if p.get("type") == ptype), None)
 
 def _resolve_shock_segment(points: list[dict], bodies: list[dict]) -> tuple[dict, dict] | None:
-    shock = next((b for b in bodies if b.get("type") == "shock"), None)
+    def _body_type(body):
+        if isinstance(body, dict):
+            return body.get("type")
+        return getattr(body, "type", None)
+
+    shock = next((b for b in bodies if _body_type(b) == "shock"), None)
     if not shock:
         return None
-    ids = [pid for pid in (shock.get("point_ids") or []) if pid]
+    if isinstance(shock, dict):
+        ids = [pid for pid in (shock.get("point_ids") or []) if pid]
+    else:
+        ids = [pid for pid in (getattr(shock, "point_ids", None) or []) if pid]
     if len(ids) < 2:
         return None
     if len(ids) == 2:
