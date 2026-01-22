@@ -958,12 +958,23 @@ async def compute_bike_kinematics(
             status_code=400,
             detail="Cannot run kinematics: scale_mm_per_px must be > 0.",
         )
+    scale_source = geom.get("scale_source")
 
-    # If we rectified points, adjust the scale into rectified coordinate space.
-    if H is not None and isinstance(rectify, dict):
-        rectify_scale = rectify.get("scale")
-        if isinstance(rectify_scale, (int, float)) and rectify_scale > 0:
-            scale_mm_per_px = scale_mm_per_px / float(rectify_scale)
+    # If we rectified points, recompute scale in rectified space from the same source.
+    if H is not None and scale_source:
+        value_field = f"{scale_source}_mm"
+        mm_value = geom.get(value_field)
+        if mm_value is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"scale_source='{scale_source}' requires '{value_field}' to be set",
+            )
+        scale_mm_per_px = _compute_scale_mm_per_px(
+            points,
+            bodies,
+            str(scale_source),
+            float(mm_value),
+        )
 
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver: List[RigidBody] = []
