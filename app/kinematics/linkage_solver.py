@@ -158,32 +158,9 @@ def _build_internal_model(
                 a_id, b_id = pids
                 extra_ids: list[str] = []
             else:
-                # Choose anchor (fixed or bb) and nearest floating point as driver edge.
-                anchor_id = None
-                for pid in pids:
-                    idx_p = idx.get(pid)
-                    if idx_p is None:
-                        continue
-                    ptype = points[idx_p].type
-                    if ptype in ("fixed", "bb"):
-                        anchor_id = pid
-                        break
-                if anchor_id is None:
-                    anchor_id = pids[0]
-                others = [pid for pid in pids if pid != anchor_id]
-                ax = x0[idx[anchor_id]]
-                ay = y0[idx[anchor_id]]
-                nearest_id = others[0]
-                nearest_dist = math.inf
-                for pid in others:
-                    i_pid = idx.get(pid)
-                    if i_pid is None:
-                        continue
-                    d = math.hypot(x0[i_pid] - ax, y0[i_pid] - ay)
-                    if d < nearest_dist:
-                        nearest_dist = d
-                        nearest_id = pid
-                a_id, b_id = anchor_id, nearest_id
+                # Use the first two point_ids as the driver edge. Any remaining point
+                # is treated as a rigid extension off the driver end.
+                a_id, b_id = pids[0], pids[1]
                 extra_ids = [pid for pid in pids if pid not in (a_id, b_id)]
             if a_id not in idx or b_id not in idx:
                 raise ValueError(f"Shock body {body.id!r} references unknown point.")
