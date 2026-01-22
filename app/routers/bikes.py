@@ -959,6 +959,12 @@ async def compute_bike_kinematics(
             detail="Cannot run kinematics: scale_mm_per_px must be > 0.",
         )
 
+    # If we rectified points, adjust the scale into rectified coordinate space.
+    if H is not None and isinstance(rectify, dict):
+        rectify_scale = rectify.get("scale")
+        if isinstance(rectify_scale, (int, float)) and rectify_scale > 0:
+            scale_mm_per_px = scale_mm_per_px / float(rectify_scale)
+
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver: List[RigidBody] = []
     for b in bodies:
