@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from typing import Optional, List
 import logging
+import numpy as np
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from pydantic import BaseModel
@@ -44,6 +45,7 @@ def bike_doc_to_out(
     hero_url: Optional[str] = None,
     hero_thumb_url: Optional[str] = None,
     hero_perspective_ellipses: Optional[dict] = None,
+    hero_perspective_homography: Optional[dict] = None,
     hero_detection_boxes: Optional[dict] = None,
 ) -> BikeOut:
     # normalise points if present
@@ -113,6 +115,7 @@ def bike_doc_to_out(
         hero_url=hero_url if hero_url is not None else doc.get("hero_url"),
         hero_thumb_url=hero_thumb_url if hero_thumb_url is not None else doc.get("hero_thumb_url"),
         hero_perspective_ellipses=perspective_ellipses or None,
+        hero_perspective_homography=hero_perspective_homography,
         hero_detection_boxes=hero_detection_boxes,
         points=points or None,
         bodies=bodies or None,
@@ -148,6 +151,26 @@ def _extract_user_oid(current_user) -> ObjectId:
 
     # raw_id is already an ObjectId or similar
     return raw_id
+
+
+def _load_perspective_homography(entry: dict | None) -> Optional[dict]:
+    if not isinstance(entry, dict):
+        return None
+    H = entry.get("H")
+    H_inv = entry.get("H_inv")
+    if H is None or H_inv is None:
+        return None
+    if isinstance(H, list) and len(H) == 3 and all(isinstance(r, list) for r in H):
+        H = [v for row in H for v in row]
+    if isinstance(H_inv, list) and len(H_inv) == 3 and all(isinstance(r, list) for r in H_inv):
+        H_inv = [v for row in H_inv for v in row]
+    try:
+        H_mat = np.array(H, dtype=float)
+        H_inv_mat = np.array(H_inv, dtype=float)
+    except Exception:
+        return None
+    rectify = entry.get("rectify") if isinstance(entry.get("rectify"), dict) else None
+    return {"H": H_mat, "H_inv": H_inv_mat, "rectify": rectify}
 
 
 def _default_page_settings() -> dict:
@@ -230,11 +253,13 @@ async def get_bike(
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_perspective_ellipses = None
+    hero_perspective_homography = None
     hero_detection_boxes = None
     if hero_id:
         media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
         if media_doc:
             hero_perspective_ellipses = media_doc.get("perspective_ellipses")
+            hero_perspective_homography = media_doc.get("perspective_homography")
             hero_detection_boxes = media_doc.get("detection_boxes")
 
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
@@ -243,6 +268,7 @@ async def get_bike(
         hero_url=hero_url,
         hero_thumb_url=hero_thumb_url,
         hero_perspective_ellipses=hero_perspective_ellipses,
+        hero_perspective_homography=hero_perspective_homography,
         hero_detection_boxes=hero_detection_boxes,
     )
 
@@ -933,15 +959,30 @@ async def compute_bike_kinematics(
             ellipses_found = bool(rear_ellipse or front_ellipse)
             if isinstance(ellipses, dict):
                 ellipses_keys = list(ellipses.keys())
-            homography = compute_homography_from_ellipses(
-                rear_ellipse,
-                front_ellipse,
-                perspective_mode,
+
+            mode_key = perspective_mode
+            if mode_key in ("both_ls", "both_avg"):
+                mode_key = "both"
+            stored_homographies = (
+                media_doc.get("perspective_homography") if isinstance(media_doc, dict) else None
             )
-            if homography:
-                H = homography["H"]
-                H_inv = homography["H_inv"]
-                rectify = homography.get("rectify")
+            if isinstance(stored_homographies, dict) and mode_key in stored_homographies:
+                loaded = _load_perspective_homography(stored_homographies.get(mode_key))
+                if loaded:
+                    H = loaded["H"]
+                    H_inv = loaded["H_inv"]
+                    rectify = loaded.get("rectify")
+
+            if H is None:
+                homography = compute_homography_from_ellipses(
+                    rear_ellipse,
+                    front_ellipse,
+                    mode_key,
+                )
+                if homography:
+                    H = homography["H"]
+                    H_inv = homography["H_inv"]
+                    rectify = homography.get("rectify")
 
     if H is not None:
         rectified_points: List[BikePoint] = []

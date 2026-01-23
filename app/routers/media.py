@@ -31,11 +31,45 @@ from app.image_processing import (
     auto_detect_rim_perspective_ellipses,
     detect_wheel_fork_boxes,
 )
+from app.kinematics.homography import compute_homography_from_ellipses
 from app.schemas import RimEllipse
 
 
 router = APIRouter(prefix="/bikes", tags=["media"])
 DEFAULT_BUCKET = os.getenv("GCS_MEDIA_BUCKET", GCS_BUCKET_NAME)
+
+
+def _serialize_homography(h: dict | None) -> dict | None:
+    if not h:
+        return None
+    H = h.get("H")
+    H_inv = h.get("H_inv")
+    rectify = h.get("rectify")
+    if H is None or H_inv is None:
+        return None
+    H_list = H.tolist() if hasattr(H, "tolist") else H
+    H_inv_list = H_inv.tolist() if hasattr(H_inv, "tolist") else H_inv
+    if isinstance(H_list, list) and len(H_list) == 3 and all(isinstance(r, list) for r in H_list):
+        H_list = [v for row in H_list for v in row]
+    if isinstance(H_inv_list, list) and len(H_inv_list) == 3 and all(isinstance(r, list) for r in H_inv_list):
+        H_inv_list = [v for row in H_inv_list for v in row]
+    return {
+        "H": H_list,
+        "H_inv": H_inv_list,
+        "rectify": rectify,
+    }
+
+
+def _build_perspective_homographies(ellipses: dict | None) -> dict:
+    rear = ellipses.get("rear") if isinstance(ellipses, dict) else None
+    front = ellipses.get("front") if isinstance(ellipses, dict) else None
+    out: dict = {}
+    for key, mode in (("front", "front"), ("rear", "rear"), ("both", "both")):
+        h = compute_homography_from_ellipses(rear, front, mode)
+        serialized = _serialize_homography(h)
+        if serialized:
+            out[key] = serialized
+    return out
 
 
 class MediaOut(BaseModel):
@@ -344,6 +378,9 @@ async def update_hero_perspective(
         "perspective_ellipses": {k: v.dict() for k, v in payload.ellipses.items()},
         "updated_at": datetime.utcnow(),
     }
+    update["perspective_homography"] = _build_perspective_homographies(
+        update["perspective_ellipses"]
+    )
     result = await media_items.update_one(
         {"_id": hero_id, "bike_id": bike_oid},
         {"$set": update},
@@ -400,6 +437,7 @@ async def auto_detect_hero_perspective(
         update = {"updated_at": datetime.utcnow()}
         if ellipses:
             update["perspective_ellipses"] = ellipses
+            update["perspective_homography"] = _build_perspective_homographies(ellipses)
         if boxes:
             merged = dict(media_doc.get("detection_boxes") or {})
             merged.update(boxes)
