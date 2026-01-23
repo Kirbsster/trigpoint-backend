@@ -167,6 +167,10 @@ def _load_perspective_homography(entry: dict | None) -> Optional[dict]:
     try:
         H_mat = np.array(H, dtype=float)
         H_inv_mat = np.array(H_inv, dtype=float)
+        if H_mat.size == 9:
+            H_mat = H_mat.reshape((3, 3))
+        if H_inv_mat.size == 9:
+            H_inv_mat = H_inv_mat.reshape((3, 3))
     except Exception:
         return None
     rectify = entry.get("rectify") if isinstance(entry.get("rectify"), dict) else None
