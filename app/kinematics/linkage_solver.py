@@ -357,8 +357,8 @@ def _solve_with_edges(
 def solve_bike_linkage(
     points: List[BikePoint],
     bodies: List[RigidBody],
-    n_steps: int = 80,
-    iterations: int = 100,
+    n_steps: int = 1000,
+    iterations: int = 1000,
 ) -> SolverResult:
     """
     Public entrypoint used by your router.
