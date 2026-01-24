@@ -898,8 +898,8 @@ async def update_geometry(
 @router.get("/{bike_id}/kinematics", response_model=SolverResult)
 async def compute_bike_kinematics(
     bike_id: str,
-    steps: int = 500,
-    iterations: int = 1000,
+    steps: int = 100,
+    iterations: int = 100,
     current_user=Depends(get_current_user),
 ):
     """

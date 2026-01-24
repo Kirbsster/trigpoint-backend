@@ -59,6 +59,7 @@ def _build_internal_model(
     int,                # driver_edge_idx
     float,              # driver_L0
     float,              # driver_stroke
+    List[dict],         # rigid groups for shape matching
 ]:
     """
     Convert your domain objects into an internal form for the solver:
@@ -93,6 +94,7 @@ def _build_internal_model(
     )
 
     edges: List[LinkEdge] = []
+    rigid_groups: List[dict] = []
     driver_edge_idx: Optional[int] = None
     driver_L0: Optional[float] = None
     driver_stroke: Optional[float] = None
@@ -199,10 +201,26 @@ def _build_internal_model(
             L0_geom = math.hypot(dx, dy)
             edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
 
+        # Rigid body shape matching (>=3 points, non-shock, non-fixed)
+        if body.type != "fixed":
+            group_indices = [idx[pid] for pid in pids if pid in idx]
+            if len(group_indices) >= 3:
+                rest = [(x0[i], y0[i]) for i in group_indices]
+                cx = sum(p[0] for p in rest) / len(rest)
+                cy = sum(p[1] for p in rest) / len(rest)
+                rigid_groups.append(
+                    {
+                        "indices": group_indices,
+                        "rest": rest,
+                        "rest_cx": cx,
+                        "rest_cy": cy,
+                    }
+                )
+
     if driver_edge_idx is None or driver_L0 is None or driver_stroke is None:
         raise ValueError("No shock body found; need exactly one RigidBody with type='shock'.")
 
-    return edges, fixed, rear_axle_idx, driver_edge_idx, driver_L0, driver_stroke
+    return edges, fixed, rear_axle_idx, driver_edge_idx, driver_L0, driver_stroke, rigid_groups
 
 
 def _rigid_pairs(point_ids: list[str], closed: bool) -> list[tuple[str, str]]:
@@ -230,6 +248,7 @@ def _solve_with_edges(
     driver_edge_idx: int,
     driver_L0: float,
     driver_stroke: float,
+    rigid_groups: List[dict],
     n_steps: int,
     iterations: int,
 ) -> SolverResult:
@@ -290,6 +309,47 @@ def _solve_with_edges(
                     y[ia] += dy * diff * half
                     x[ib] -= dx * diff * half
                     y[ib] -= dy * diff * half
+
+            # Rigid body shape matching (prevents collinear "bending")
+            for group in rigid_groups or []:
+                indices = group["indices"]
+                if not indices:
+                    continue
+                if all(fixed[i] for i in indices):
+                    continue
+
+                rest = group["rest"]
+                rest_cx = group["rest_cx"]
+                rest_cy = group["rest_cy"]
+
+                cur_cx = sum(x[i] for i in indices) / len(indices)
+                cur_cy = sum(y[i] for i in indices) / len(indices)
+
+                a = 0.0
+                b = 0.0
+                for (rx, ry), i in zip(rest, indices):
+                    qx = rx - rest_cx
+                    qy = ry - rest_cy
+                    px = x[i] - cur_cx
+                    py = y[i] - cur_cy
+                    a += px * qx + py * qy
+                    b += py * qx - px * qy
+
+                denom = math.hypot(a, b)
+                if denom < 1e-9:
+                    continue
+                cos_t = a / denom
+                sin_t = b / denom
+
+                for (rx, ry), i in zip(rest, indices):
+                    if fixed[i]:
+                        continue
+                    qx = rx - rest_cx
+                    qy = ry - rest_cy
+                    tx = cos_t * qx - sin_t * qy
+                    ty = sin_t * qx + cos_t * qy
+                    x[i] = cur_cx + tx
+                    y[i] = cur_cy + ty
 
         # --- Record this step ---
         # Rear axle travel (vertical, positive "up" from initial)
@@ -376,6 +436,7 @@ def solve_bike_linkage(
         driver_edge_idx,
         driver_L0,
         driver_stroke,
+        rigid_groups,
     ) = _build_internal_model(points, bodies)
 
     return _solve_with_edges(
@@ -386,6 +447,7 @@ def solve_bike_linkage(
         driver_edge_idx=driver_edge_idx,
         driver_L0=driver_L0,
         driver_stroke=driver_stroke,
+        rigid_groups=rigid_groups,
         n_steps=n_steps,
         iterations=iterations,
     )
