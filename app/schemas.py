@@ -150,6 +150,7 @@ class BikeKinematics(BaseModel):
     n_steps: int = 0
     driver_stroke: Optional[float] = None
     steps: List[KinematicsStep] = Field(default_factory=list)
+    scaled_outputs: Optional[Dict[str, Any]] = None
 
 
 class BikeOut(BaseModel):

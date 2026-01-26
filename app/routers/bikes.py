@@ -1140,28 +1140,6 @@ async def compute_bike_kinematics(
             }
         )
 
-    kin_doc = {
-        "rear_axle_point_id": result.rear_axle_point_id,
-        "n_steps": len(solver_steps),
-        # Already in mm after scaling above
-        "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
-        "steps": kin_steps,
-    }
-
-    # --------------------------------------------------------
-    # 4) Persist into Mongo
-    # --------------------------------------------------------
-    await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
-        {
-            "$set": {
-                "points": new_points,
-                "kinematics": kin_doc,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-    )
-
     # Front-end gets the scaled result (mm stroke/travel, px coords)
     result.steps = solver_steps
     rear_axle_steps = []
@@ -1230,11 +1208,36 @@ async def compute_bike_kinematics(
                     rear_axle_relative_mm.append([dx, dy])
                 leverage_ratio_series.append(step.leverage_ratio)
                 shock_stroke_mm_series.append(step.shock_stroke)
-    result.scaled_outputs = {
+    scaled_outputs = {
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
     }
+
+    kin_doc = {
+        "rear_axle_point_id": result.rear_axle_point_id,
+        "n_steps": len(solver_steps),
+        # Already in mm after scaling above
+        "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
+        "steps": kin_steps,
+        "scaled_outputs": scaled_outputs,
+    }
+
+    # --------------------------------------------------------
+    # 4) Persist into Mongo
+    # --------------------------------------------------------
+    await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {
+            "$set": {
+                "points": new_points,
+                "kinematics": kin_doc,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    result.scaled_outputs = scaled_outputs
     return result
 
 
@@ -1319,6 +1322,7 @@ async def get_cached_bike_kinematics(
         n_steps=kin.get("n_steps") or (len(kin.get("steps") or [])),
         driver_stroke=kin.get("driver_stroke"),
         steps=kin.get("steps") or [],
+        scaled_outputs=kin.get("scaled_outputs"),
     )
 
 
