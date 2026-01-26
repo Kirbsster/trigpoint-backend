@@ -1208,6 +1208,33 @@ async def compute_bike_kinematics(
         "body_count": len(bodies),
         "rear_axle_steps": rear_axle_steps,
     }
+    rear_axle_relative_mm: list[list[float]] = []
+    leverage_ratio_series: list[Optional[float]] = []
+    shock_stroke_mm_series: list[Optional[float]] = []
+    if result.rear_axle_point_id:
+        origin = None
+        for step in solver_steps:
+            coords = step.points.get(result.rear_axle_point_id)
+            if coords:
+                origin = (float(coords[0]), float(coords[1]))
+                break
+        if origin:
+            ox, oy = origin
+            for step in solver_steps:
+                coords = step.points.get(result.rear_axle_point_id)
+                if not coords:
+                    rear_axle_relative_mm.append([0.0, 0.0])
+                else:
+                    dx = (float(coords[0]) - ox) * scale_mm_per_px
+                    dy = (float(coords[1]) - oy) * scale_mm_per_px
+                    rear_axle_relative_mm.append([dx, dy])
+                leverage_ratio_series.append(step.leverage_ratio)
+                shock_stroke_mm_series.append(step.shock_stroke)
+    result.scaled_outputs = {
+        "rear_axle_relative_mm": rear_axle_relative_mm,
+        "leverage_ratio": leverage_ratio_series,
+        "shock_stroke_mm": shock_stroke_mm_series,
+    }
     return result
 
 

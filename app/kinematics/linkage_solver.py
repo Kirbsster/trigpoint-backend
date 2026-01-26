@@ -44,6 +44,8 @@ class SolverResult(BaseModel):
     rear_axle_point_id: Optional[str]
     # Optional debug payload for the frontend
     debug: Optional[Dict[str, object]] = None
+    # Optional scaled outputs for UI tables/plots
+    scaled_outputs: Optional[Dict[str, object]] = None
 
 
 # ------------ Converter: BikePoint + RigidBody → edges + flags ------------
