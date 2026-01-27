@@ -898,8 +898,8 @@ async def update_geometry(
 @router.get("/{bike_id}/kinematics", response_model=SolverResult)
 async def compute_bike_kinematics(
     bike_id: str,
-    steps: int = 100,
-    iterations: int = 100,
+    steps: int = 250,
+    iterations: int = 250,
     current_user=Depends(get_current_user),
 ):
     """
@@ -1206,8 +1206,25 @@ async def compute_bike_kinematics(
                     dx = (float(coords[0]) - ox) * scale_mm_per_px
                     dy = (float(coords[1]) - oy) * scale_mm_per_px
                     rear_axle_relative_mm.append([dx, dy])
-                leverage_ratio_series.append(step.leverage_ratio)
                 shock_stroke_mm_series.append(step.shock_stroke)
+        # Compute leverage ratio with a smooth numerical gradient
+        if solver_steps:
+            travel_series = [
+                (float(s.rear_travel) if s.rear_travel is not None else np.nan)
+                for s in solver_steps
+            ]
+            stroke_series = [
+                (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
+                for s in solver_steps
+            ]
+            try:
+                with np.errstate(all="ignore"):
+                    grad = np.gradient(travel_series, stroke_series)
+                leverage_ratio_series = [
+                    (float(val) if np.isfinite(val) else None) for val in grad
+                ]
+            except Exception:
+                leverage_ratio_series = []
     scaled_outputs = {
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
