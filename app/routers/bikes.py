@@ -1217,9 +1217,20 @@ async def compute_bike_kinematics(
                 (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
                 for s in solver_steps
             ]
+            # Pre-roll a few steps to stabilize gradient near zero travel.
+            pre_steps = 5
             try:
+                ext_travel = list(travel_series)
+                ext_stroke = list(stroke_series)
+                if len(stroke_series) >= 2:
+                    ds = stroke_series[1] - stroke_series[0]
+                    dt = travel_series[1] - travel_series[0]
+                    for k in range(pre_steps, 0, -1):
+                        ext_stroke.insert(0, stroke_series[0] - k * ds)
+                        ext_travel.insert(0, travel_series[0] - k * dt)
                 with np.errstate(all="ignore"):
-                    grad = np.gradient(travel_series, stroke_series)
+                    grad = np.gradient(ext_travel, ext_stroke)
+                grad = grad[pre_steps:] if len(grad) >= pre_steps else grad
                 leverage_ratio_series = [
                     (float(val) if np.isfinite(val) else None) for val in grad
                 ]
