@@ -1077,6 +1077,7 @@ async def compute_bike_kinematics(
             bodies=bodies_for_solver,  # NOTE: stroke now in px
             n_steps=steps,
             iterations=iterations,
+            pre_steps=5,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1231,6 +1232,10 @@ async def compute_bike_kinematics(
                 with np.errstate(all="ignore"):
                     grad = np.gradient(ext_travel, ext_stroke)
                 grad = grad[pre_steps:] if len(grad) >= pre_steps else grad
+                # Endpoint smoothing: use neighboring value to avoid sharp kink at step 0
+                if len(grad) >= 2:
+                    grad[0] = grad[1]
+                    grad[-1] = grad[-2]
                 leverage_ratio_series = [
                     (float(val) if np.isfinite(val) else None) for val in grad
                 ]

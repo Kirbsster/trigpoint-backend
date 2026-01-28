@@ -253,6 +253,7 @@ def _solve_with_edges(
     rigid_groups: List[dict],
     n_steps: int,
     iterations: int,
+    pre_steps: int = 0,
 ) -> SolverResult:
     """
     Position-based distance-constraint solver for the linkage.
@@ -270,9 +271,11 @@ def _solve_with_edges(
     n_steps = max(1, n_steps)
     iterations = max(1, iterations)
 
-    for step_i in range(n_steps + 1):
-        # Shock stroke used at this step (0 → full)
-        s = driver_stroke * (step_i / n_steps)
+    total_steps = n_steps + max(0, pre_steps)
+
+    for step_i in range(total_steps + 1):
+        # Shock stroke used at this step (negative → full, if pre_steps > 0)
+        s = driver_stroke * ((step_i - pre_steps) / n_steps)
         target_shock_len = driver_L0 - s  # shorten shock with positive stroke
 
         # Iterative constraint projection
@@ -388,6 +391,14 @@ def _solve_with_edges(
             )
         )
 
+    if pre_steps > 0 and len(steps) > pre_steps:
+        trimmed: List[SolverStep] = []
+        for s in steps[pre_steps:]:
+            trimmed.append(
+                s.copy(update={"step_index": s.step_index - pre_steps})
+            )
+        steps = trimmed
+
     rear_axle_id = points[rear_axle_idx].id if rear_axle_idx is not None else None
 
     # --- Debug payload for the frontend ---
@@ -408,6 +419,7 @@ def _solve_with_edges(
         "driver_edge_index": driver_edge_idx,
         "driver_L0": driver_L0,
         "driver_stroke": driver_stroke,
+        "pre_steps": pre_steps,
     }
 
     return SolverResult(steps=steps, rear_axle_point_id=rear_axle_id, debug=debug_data)
@@ -421,6 +433,7 @@ def solve_bike_linkage(
     bodies: List[RigidBody],
     n_steps: int = 1000,
     iterations: int = 1000,
+    pre_steps: int = 0,
 ) -> SolverResult:
     """
     Public entrypoint used by your router.
@@ -452,4 +465,5 @@ def solve_bike_linkage(
         rigid_groups=rigid_groups,
         n_steps=n_steps,
         iterations=iterations,
+        pre_steps=pre_steps,
     )
