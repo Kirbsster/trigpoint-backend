@@ -1218,20 +1218,28 @@ async def compute_bike_kinematics(
                 (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
                 for s in solver_steps
             ]
-            # Pre-roll a few steps to stabilize gradient near zero travel.
             pre_steps = 5
             try:
-                ext_travel = list(travel_series)
-                ext_stroke = list(stroke_series)
-                if len(stroke_series) >= 2:
-                    ds = stroke_series[1] - stroke_series[0]
-                    dt = travel_series[1] - travel_series[0]
-                    for k in range(pre_steps, 0, -1):
-                        ext_stroke.insert(0, stroke_series[0] - k * ds)
-                        ext_travel.insert(0, travel_series[0] - k * dt)
-                with np.errstate(all="ignore"):
-                    grad = np.gradient(ext_travel, ext_stroke)
-                grad = grad[pre_steps:] if len(grad) >= pre_steps else grad
+                grad = None
+                if result.full_steps and pre_steps > 0:
+                    full_travel = [
+                        (float(s.rear_travel) if s.rear_travel is not None else np.nan)
+                        for s in result.full_steps
+                    ]
+                    full_stroke = [
+                        (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
+                        for s in result.full_steps
+                    ]
+                    with np.errstate(all="ignore"):
+                        grad_full = np.gradient(full_travel, full_stroke)
+                    if len(grad_full) >= pre_steps:
+                        grad = grad_full[pre_steps:]
+                if grad is None:
+                    with np.errstate(all="ignore"):
+                        grad = np.gradient(travel_series, stroke_series)
+                # Trim to solver steps length if needed.
+                if len(grad) > len(solver_steps):
+                    grad = grad[: len(solver_steps)]
                 # Endpoint smoothing: use neighboring value to avoid sharp kink at step 0
                 if len(grad) >= 2:
                     grad[0] = grad[1]
