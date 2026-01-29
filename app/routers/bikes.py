@@ -1269,11 +1269,20 @@ async def compute_bike_kinematics(
     if result.rear_axle_point_id and result.full_steps:
         full_steps = result.full_steps
         origin = None
-        for step in full_steps:
-            coords = step.points.get(result.rear_axle_point_id)
-            if coords:
-                origin = (float(coords[0]), float(coords[1]))
-                break
+        pre_steps = 5
+        if pre_steps > 0:
+            for step in full_steps:
+                if step.step_index == pre_steps:
+                    coords = step.points.get(result.rear_axle_point_id)
+                    if coords:
+                        origin = (float(coords[0]), float(coords[1]))
+                        break
+        if origin is None:
+            for step in full_steps:
+                coords = step.points.get(result.rear_axle_point_id)
+                if coords:
+                    origin = (float(coords[0]), float(coords[1]))
+                    break
         if origin:
             ox, oy = origin
             for step in full_steps:
