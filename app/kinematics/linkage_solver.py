@@ -44,6 +44,8 @@ class SolverResult(BaseModel):
     rear_axle_point_id: Optional[str]
     # Optional debug payload for the frontend
     debug: Optional[Dict[str, object]] = None
+    # Optional full steps including pre-roll (negative stroke)
+    full_steps: Optional[List[SolverStep]] = None
     # Optional scaled outputs for UI tables/plots
     scaled_outputs: Optional[Dict[str, object]] = None
 
@@ -391,6 +393,7 @@ def _solve_with_edges(
             )
         )
 
+    full_steps = steps
     if pre_steps > 0 and len(steps) > pre_steps:
         trimmed: List[SolverStep] = []
         for s in steps[pre_steps:]:
@@ -422,7 +425,12 @@ def _solve_with_edges(
         "pre_steps": pre_steps,
     }
 
-    return SolverResult(steps=steps, rear_axle_point_id=rear_axle_id, debug=debug_data)
+    return SolverResult(
+        steps=steps,
+        rear_axle_point_id=rear_axle_id,
+        debug=debug_data,
+        full_steps=full_steps,
+    )
 
 
 # ------------ Public API ------------
