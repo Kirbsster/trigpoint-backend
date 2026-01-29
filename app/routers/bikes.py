@@ -1190,9 +1190,6 @@ async def compute_bike_kinematics(
     rear_axle_relative_mm: list[list[float]] = []
     leverage_ratio_series: list[Optional[float]] = []
     shock_stroke_mm_series: list[Optional[float]] = []
-    rear_axle_relative_mm_full: list[list[float]] = []
-    leverage_ratio_full: list[Optional[float]] = []
-    shock_stroke_mm_full: list[Optional[float]] = []
     if result.rear_axle_point_id:
         origin = None
         for step in solver_steps:
@@ -1245,64 +1242,10 @@ async def compute_bike_kinematics(
             except Exception:
                 leverage_ratio_series = []
 
-        if result.full_steps:
-            full_steps = result.full_steps
-            travel_full = [
-                (float(s.rear_travel) if s.rear_travel is not None else np.nan)
-                for s in full_steps
-            ]
-            stroke_full = [
-                (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
-                for s in full_steps
-            ]
-            try:
-                with np.errstate(all="ignore"):
-                    grad_full = np.gradient(travel_full, stroke_full)
-                if len(grad_full) >= 2:
-                    grad_full[0] = grad_full[1]
-                    grad_full[-1] = grad_full[-2]
-                leverage_ratio_full = [
-                    (float(val) if np.isfinite(val) else None) for val in grad_full
-                ]
-            except Exception:
-                leverage_ratio_full = []
-    if result.rear_axle_point_id and result.full_steps:
-        full_steps = result.full_steps
-        origin = None
-        pre_steps = 5
-        if pre_steps > 0:
-            for step in full_steps:
-                if step.step_index == pre_steps:
-                    coords = step.points.get(result.rear_axle_point_id)
-                    if coords:
-                        origin = (float(coords[0]), float(coords[1]))
-                        break
-        if origin is None:
-            for step in full_steps:
-                coords = step.points.get(result.rear_axle_point_id)
-                if coords:
-                    origin = (float(coords[0]), float(coords[1]))
-                    break
-        if origin:
-            ox, oy = origin
-            for step in full_steps:
-                coords = step.points.get(result.rear_axle_point_id)
-                if not coords:
-                    rear_axle_relative_mm_full.append([0.0, 0.0])
-                else:
-                    dx = (float(coords[0]) - ox) * scale_mm_per_px
-                    dy = (float(coords[1]) - oy) * scale_mm_per_px
-                    rear_axle_relative_mm_full.append([dx, dy])
-                shock_stroke_mm_full.append(step.shock_stroke)
-
     scaled_outputs = {
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
-        "rear_axle_relative_mm_full": rear_axle_relative_mm_full,
-        "leverage_ratio_full": leverage_ratio_full,
-        "shock_stroke_mm_full": shock_stroke_mm_full,
-        "pre_steps": 5,
     }
 
     kin_doc = {
