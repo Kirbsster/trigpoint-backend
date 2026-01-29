@@ -1191,15 +1191,24 @@ async def compute_bike_kinematics(
     leverage_ratio_series: list[Optional[float]] = []
     shock_stroke_mm_series: list[Optional[float]] = []
     if result.rear_axle_point_id:
+        source_steps = result.full_steps or solver_steps
+        trim_index = 0
+        if source_steps:
+            for idx, step in enumerate(source_steps):
+                if step.shock_stroke is not None and step.shock_stroke >= -1e-9:
+                    trim_index = idx
+                    break
+
         origin = None
-        for step in solver_steps:
-            coords = step.points.get(result.rear_axle_point_id)
-            if coords:
-                origin = (float(coords[0]), float(coords[1]))
-                break
+        if source_steps:
+            for step in source_steps[trim_index:]:
+                coords = step.points.get(result.rear_axle_point_id)
+                if coords:
+                    origin = (float(coords[0]), float(coords[1]))
+                    break
         if origin:
             ox, oy = origin
-            for step in solver_steps:
+            for step in source_steps[trim_index:]:
                 coords = step.points.get(result.rear_axle_point_id)
                 if not coords:
                     rear_axle_relative_mm.append([0.0, 0.0])
@@ -1208,38 +1217,27 @@ async def compute_bike_kinematics(
                     dy = (float(coords[1]) - oy) * scale_mm_per_px
                     rear_axle_relative_mm.append([dx, dy])
                 shock_stroke_mm_series.append(step.shock_stroke)
+
         # Compute leverage ratio with a smooth numerical gradient
-        if solver_steps:
+        if source_steps:
             travel_series = [
                 (float(s.rear_travel) if s.rear_travel is not None else np.nan)
-                for s in solver_steps
+                for s in source_steps
             ]
             stroke_series = [
                 (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
-                for s in solver_steps
+                for s in source_steps
             ]
-            pre_steps = 5
             try:
-                grad = None
-                if result.full_steps and pre_steps > 0:
-                    full_travel = [
-                        (float(s.rear_travel) if s.rear_travel is not None else np.nan)
-                        for s in result.full_steps
-                    ]
-                    full_stroke = [
-                        (float(s.shock_stroke) if s.shock_stroke is not None else np.nan)
-                        for s in result.full_steps
-                    ]
-                    with np.errstate(all="ignore"):
-                        grad_full = np.gradient(full_travel, full_stroke)
-                    if len(grad_full) >= pre_steps:
-                        grad = grad_full[pre_steps:]
-                if grad is None:
-                    with np.errstate(all="ignore"):
-                        grad = np.gradient(travel_series, stroke_series)
-                # Trim to solver steps length if needed.
-                if len(grad) > len(solver_steps):
-                    grad = grad[: len(solver_steps)]
+                with np.errstate(all="ignore"):
+                    grad_full = np.gradient(travel_series, stroke_series)
+                if trim_index > 0 and len(grad_full) > trim_index:
+                    grad = grad_full[trim_index:]
+                else:
+                    grad = grad_full
+                # Trim to series length if needed.
+                if len(grad) > len(shock_stroke_mm_series):
+                    grad = grad[: len(shock_stroke_mm_series)]
                 # Endpoint smoothing: use neighboring value to avoid sharp kink at step 0
                 if len(grad) >= 2:
                     grad[0] = grad[1]
