@@ -274,10 +274,19 @@ def _solve_with_edges(
     iterations = max(1, iterations)
 
     total_steps = n_steps + max(0, pre_steps)
+    # Negative extension length based on pre-roll steps.
+    pre_roll_len = 0.0
+    if pre_steps > 0:
+        step_stroke = driver_stroke / n_steps
+        pre_roll_len = step_stroke * pre_steps
 
     for step_i in range(total_steps + 1):
-        # Shock stroke used at this step (negative → full, if pre_steps > 0)
-        s = driver_stroke * ((step_i - pre_steps) / n_steps)
+        # Shock stroke used at this step (negative → extension, if pre_steps > 0)
+        if pre_steps > 0 and step_i < pre_steps:
+            # Linearly extend up to pre_roll_len before zero travel.
+            s = -pre_roll_len * ((pre_steps - step_i) / pre_steps)
+        else:
+            s = driver_stroke * ((step_i - pre_steps) / n_steps)
         target_shock_len = driver_L0 - s  # shorten shock with positive stroke
 
         # Iterative constraint projection
