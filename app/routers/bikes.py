@@ -1190,6 +1190,9 @@ async def compute_bike_kinematics(
     rear_axle_relative_mm: list[list[float]] = []
     leverage_ratio_series: list[Optional[float]] = []
     shock_stroke_mm_series: list[Optional[float]] = []
+    rear_axle_relative_mm_full: list[list[float]] = []
+    leverage_ratio_full: list[Optional[float]] = []
+    shock_stroke_mm_full: list[Optional[float]] = []
     if result.rear_axle_point_id:
         source_steps = result.full_steps or solver_steps
         trim_index = 0
@@ -1218,6 +1221,26 @@ async def compute_bike_kinematics(
                     rear_axle_relative_mm.append([dx, dy])
                 shock_stroke_mm_series.append(step.shock_stroke)
 
+        # Full-series outputs (include negative travel) for debugging.
+        if source_steps:
+            origin_full = None
+            for step in source_steps:
+                coords = step.points.get(result.rear_axle_point_id)
+                if coords:
+                    origin_full = (float(coords[0]), float(coords[1]))
+                    break
+            if origin_full:
+                ox, oy = origin_full
+                for step in source_steps:
+                    coords = step.points.get(result.rear_axle_point_id)
+                    if not coords:
+                        rear_axle_relative_mm_full.append([0.0, 0.0])
+                    else:
+                        dx = (float(coords[0]) - ox) * scale_mm_per_px
+                        dy = (float(coords[1]) - oy) * scale_mm_per_px
+                        rear_axle_relative_mm_full.append([dx, dy])
+                    shock_stroke_mm_full.append(step.shock_stroke)
+
         # Compute leverage ratio with a smooth numerical gradient
         if source_steps:
             travel_series = [
@@ -1231,6 +1254,9 @@ async def compute_bike_kinematics(
             try:
                 with np.errstate(all="ignore"):
                     grad_full = np.gradient(travel_series, stroke_series)
+                leverage_ratio_full = [
+                    (float(val) if np.isfinite(val) else None) for val in grad_full
+                ]
                 if trim_index > 0 and len(grad_full) > trim_index:
                     grad = grad_full[trim_index:]
                 else:
@@ -1252,6 +1278,9 @@ async def compute_bike_kinematics(
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
+        "rear_axle_relative_mm_full": rear_axle_relative_mm_full,
+        "leverage_ratio_full": leverage_ratio_full,
+        "shock_stroke_mm_full": shock_stroke_mm_full,
     }
 
     kin_doc = {
