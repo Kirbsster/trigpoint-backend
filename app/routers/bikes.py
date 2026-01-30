@@ -1264,10 +1264,6 @@ async def compute_bike_kinematics(
                 # Trim to series length if needed.
                 if len(grad) > len(shock_stroke_mm_series):
                     grad = grad[: len(shock_stroke_mm_series)]
-                # Endpoint smoothing: use neighboring value to avoid sharp kink at step 0
-                if len(grad) >= 2:
-                    grad[0] = grad[1]
-                    grad[-1] = grad[-2]
                 leverage_ratio_series = [
                     (float(val) if np.isfinite(val) else None) for val in grad
                 ]
