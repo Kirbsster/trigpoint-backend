@@ -1224,7 +1224,7 @@ async def compute_bike_kinematics(
         # Full-series outputs (include negative travel) for debugging.
         if source_steps:
             origin_full = None
-            for step in source_steps:
+            for step in source_steps[trim_index:]:
                 coords = step.points.get(result.rear_axle_point_id)
                 if coords:
                     origin_full = (float(coords[0]), float(coords[1]))
