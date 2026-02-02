@@ -173,6 +173,12 @@ class BikeOut(BaseModel):
     kinematics: Optional[BikeKinematics] = None
 
 
+class BikeUpdate(BaseModel):
+    name: Optional[str] = None
+    brand: Optional[str] = None
+    model_year: Optional[int] = None
+
+
 class BikePageSettingsPayload(BaseModel):
     settings: Dict[str, Any] = Field(default_factory=dict)
 

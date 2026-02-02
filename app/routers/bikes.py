@@ -25,6 +25,7 @@ from app.schemas import (
     BikeGeometry,
     BikeKinematics,
     RimEllipse,
+    BikeUpdate,
     BikePageSettingsPayload,
     BikePageSettingsOut,
 )
@@ -250,6 +251,57 @@ async def get_bike(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
+    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    hero_id = doc.get("hero_media_id")
+    hero_url = await resolve_hero_url(hero_id)
+    hero_perspective_ellipses = None
+    hero_perspective_homography = None
+    hero_detection_boxes = None
+    if hero_id:
+        media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
+        if media_doc:
+            hero_perspective_ellipses = media_doc.get("perspective_ellipses")
+            hero_perspective_homography = media_doc.get("perspective_homography")
+            hero_detection_boxes = media_doc.get("detection_boxes")
+
+    hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+    return bike_doc_to_out(
+        doc,
+        hero_url=hero_url,
+        hero_thumb_url=hero_thumb_url,
+        hero_perspective_ellipses=hero_perspective_ellipses,
+        hero_perspective_homography=hero_perspective_homography,
+        hero_detection_boxes=hero_detection_boxes,
+    )
+
+
+@router.put("/{bike_id}", response_model=BikeOut)
+async def update_bike(
+    bike_id: str,
+    payload: BikeUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    update_data = payload.dict(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    bikes = bikes_col()
+    result = await bikes.update_one(
+        {"_id": oid, "user_id": user_oid},
+        {"$set": {**update_data, "updated_at": datetime.utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
     doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
