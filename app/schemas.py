@@ -57,6 +57,7 @@ class BikeCreate(BaseModel):
     name: str
     brand: str
     model_year: Optional[int] = None
+    bike_size: Optional[str] = None
 
 
 class PointCoord(BaseModel):
@@ -158,6 +159,7 @@ class BikeOut(BaseModel):
     name: str
     brand: str
     model_year: Optional[int] = None
+    bike_size: Optional[str] = None
     user_id: str
     created_at: datetime
     updated_at: datetime
@@ -177,6 +179,7 @@ class BikeUpdate(BaseModel):
     name: Optional[str] = None
     brand: Optional[str] = None
     model_year: Optional[int] = None
+    bike_size: Optional[str] = None
 
 
 class BikePageSettingsPayload(BaseModel):

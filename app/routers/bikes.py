@@ -107,6 +107,7 @@ def bike_doc_to_out(
         name=doc["name"],
         brand=doc["brand"],
         model_year=doc.get("model_year"),
+        bike_size=doc.get("bike_size"),
         # Avoid "None" string if user_id is missing on old docs
         user_id=str(doc["user_id"]) if doc.get("user_id") is not None else "",
         created_at=doc["created_at"],
@@ -213,6 +214,7 @@ async def create_bike(
         "name": bike_in.name,
         "brand": bike_in.brand,
         "model_year": bike_in.model_year,
+        "bike_size": bike_in.bike_size,
         "created_at": now,
         "updated_at": now,
     }
