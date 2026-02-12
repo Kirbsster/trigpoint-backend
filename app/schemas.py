@@ -88,6 +88,16 @@ class RimEllipse(BaseModel):
     ry: float
     angle_deg: float
 
+class DisplayControlPoint(BaseModel):
+    t: float
+    offset: float
+
+
+class BodyDisplayGeometry(BaseModel):
+    version: int = 1
+    interpolation: Literal["pchip"] = "pchip"
+    control_points: List[DisplayControlPoint] = Field(default_factory=list)
+
 
 class RigidBody(BaseModel):
     id: str
@@ -97,6 +107,7 @@ class RigidBody(BaseModel):
     closed: bool = False                # for loops (probably False for linkages)
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
+    display_geometry: Optional[BodyDisplayGeometry] = None
 
 class PerspectiveCorrection(BaseModel):
     rear_rim_pts: List[PointCoord] = Field(default_factory=list)
