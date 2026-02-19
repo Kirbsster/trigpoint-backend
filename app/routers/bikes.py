@@ -29,7 +29,7 @@ from app.schemas import (
     BikePageSettingsPayload,
     BikePageSettingsOut,
 )
-from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult
+from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult, SolverStep
 from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
 from app.db import bikes_col, media_items_col, bike_page_settings_col
@@ -691,6 +691,104 @@ def _compute_scale_mm_per_px(
     return float(mm_value) / float(d_px)
 
 
+def _pick_rear_body_point_ids(
+    bodies: list[RigidBody],
+    rear_axle_point_id: Optional[str],
+) -> list[str]:
+    """Pick the rigid body carrying the rear axle (excluding shock/fixed bodies)."""
+    if not rear_axle_point_id:
+        return []
+
+    for body in bodies or []:
+        if not isinstance(body, RigidBody):
+            continue
+        if body.type in ("shock", "fixed"):
+            continue
+        pids = [pid for pid in (body.point_ids or []) if pid]
+        if rear_axle_point_id in pids:
+            return pids
+    return []
+
+
+def _compute_instant_center_series(
+    steps: list[SolverStep],
+    body_point_ids: list[str],
+) -> list[dict[str, Optional[float]]]:
+    """
+    Compute instantaneous center per step from point trajectories of one rigid body.
+
+    Returns a list with one entry per step:
+    - {"x": float, "y": float} when resolvable
+    - {"x": None, "y": None} when near-pure translation / underconstrained
+    """
+    out: list[dict[str, Optional[float]]] = []
+    if not steps:
+        return out
+    ids = [pid for pid in (body_point_ids or []) if pid]
+    if len(ids) < 2:
+        return [{"x": None, "y": None} for _ in steps]
+
+    n_steps = len(steps)
+    omega_eps = 1e-9
+
+    for i in range(n_steps):
+        rows: list[list[float]] = []
+        rhs: list[float] = []
+
+        if i <= 0:
+            i0, i1, dt = 0, 1, 1.0
+        elif i >= n_steps - 1:
+            i0, i1, dt = n_steps - 2, n_steps - 1, 1.0
+        else:
+            i0, i1, dt = i - 1, i + 1, 2.0
+
+        for pid in ids:
+            p_now = steps[i].points.get(pid)
+            p0 = steps[i0].points.get(pid)
+            p1 = steps[i1].points.get(pid)
+            if not p_now or not p0 or not p1:
+                continue
+            try:
+                x = float(p_now[0])
+                y = float(p_now[1])
+                vx = (float(p1[0]) - float(p0[0])) / dt
+                vy = (float(p1[1]) - float(p0[1])) / dt
+            except Exception:
+                continue
+
+            # v = [Vx, Vy] + omega * [-y, x]
+            rows.append([1.0, 0.0, -y])
+            rhs.append(vx)
+            rows.append([0.0, 1.0, x])
+            rhs.append(vy)
+
+        if len(rows) < 4:
+            out.append({"x": None, "y": None})
+            continue
+
+        try:
+            A = np.asarray(rows, dtype=float)
+            b = np.asarray(rhs, dtype=float)
+            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+            Vx, Vy, omega = float(sol[0]), float(sol[1]), float(sol[2])
+        except Exception:
+            out.append({"x": None, "y": None})
+            continue
+
+        if not np.isfinite(omega) or abs(omega) < omega_eps:
+            out.append({"x": None, "y": None})
+            continue
+
+        x_ic = -Vy / omega
+        y_ic = Vx / omega
+        if not np.isfinite(x_ic) or not np.isfinite(y_ic):
+            out.append({"x": None, "y": None})
+            continue
+        out.append({"x": float(x_ic), "y": float(y_ic)})
+
+    return out
+
+
 @router.put("/{bike_id}/geometry", response_model=BikeOut)
 async def update_geometry(
     bike_id: str,
@@ -1042,6 +1140,8 @@ async def compute_bike_kinematics(
                     H_inv = homography["H_inv"]
                     rectify = homography.get("rectify")
 
+    tx = None
+    ty = None
     if H is not None:
         rectified_points: List[BikePoint] = []
         scale = rectify.get("scale") if isinstance(rectify, dict) else None
@@ -1149,26 +1249,54 @@ async def compute_bike_kinematics(
         if s.rear_travel is not None:
             s.rear_travel = s.rear_travel * scale_mm # → mm
 
-    # --------------------------------------------------------
-    # 2) Build coords per point_id: coords[i] = (x,y) at step i (STILL px)
-    # --------------------------------------------------------
-    coords_map: dict[str, list[dict]] = {}
     rectify_scale = None
     if isinstance(rectify, dict) and rectify.get("scale") is not None:
         try:
             rectify_scale = float(rectify.get("scale"))
         except Exception:
             rectify_scale = None
+
+    def _map_solver_xy_to_image_xy(x: float, y: float) -> dict[str, Optional[float]]:
+        if H_inv is not None and rectify_scale and tx is not None and ty is not None:
+            rx = (float(x) - tx) / rectify_scale
+            ry = (float(y) - ty) / rectify_scale
+            mapped = apply_homography(H_inv, rx, ry)
+            if mapped:
+                return {"x": float(mapped[0]), "y": float(mapped[1])}
+        return {"x": float(x), "y": float(y)}
+
+    # --------------------------------------------------------
+    # 2) Build coords per point_id: coords[i] = (x,y) at step i (STILL px)
+    # --------------------------------------------------------
+    coords_map: dict[str, list[dict]] = {}
     for step in solver_steps:
         for pid, (x, y) in step.points.items():
-            if H_inv is not None and rectify_scale and tx is not None and ty is not None:
-                rx = (float(x) - tx) / rectify_scale
-                ry = (float(y) - ty) / rectify_scale
-                mapped = apply_homography(H_inv, rx, ry)
-                if mapped:
-                    coords_map.setdefault(pid, []).append({"x": mapped[0], "y": mapped[1]})
-                    continue
-            coords_map.setdefault(pid, []).append({"x": float(x), "y": float(y)})
+            mapped = _map_solver_xy_to_image_xy(float(x), float(y))
+            coords_map.setdefault(pid, []).append(mapped)
+
+    # Instant center coordinates (same coordinate space/shape as point coords lists).
+    rear_body_point_ids = _pick_rear_body_point_ids(bodies, result.rear_axle_point_id)
+    instant_center_solver = _compute_instant_center_series(solver_steps, rear_body_point_ids)
+    instant_center_coords: list[dict[str, Optional[float]]] = []
+    for ic in instant_center_solver:
+        x_ic = ic.get("x")
+        y_ic = ic.get("y")
+        if x_ic is None or y_ic is None:
+            instant_center_coords.append({"x": None, "y": None})
+            continue
+        instant_center_coords.append(_map_solver_xy_to_image_xy(float(x_ic), float(y_ic)))
+
+    source_steps = result.full_steps or solver_steps
+    instant_center_coords_full: list[dict[str, Optional[float]]] = []
+    if source_steps:
+        instant_center_solver_full = _compute_instant_center_series(source_steps, rear_body_point_ids)
+        for ic in instant_center_solver_full:
+            x_ic = ic.get("x")
+            y_ic = ic.get("y")
+            if x_ic is None or y_ic is None:
+                instant_center_coords_full.append({"x": None, "y": None})
+                continue
+            instant_center_coords_full.append(_map_solver_xy_to_image_xy(float(x_ic), float(y_ic)))
 
     # Rebuild points with coords attached (coords are image pixels)
     new_points: list[dict] = []
@@ -1248,7 +1376,6 @@ async def compute_bike_kinematics(
     leverage_ratio_full: list[Optional[float]] = []
     shock_stroke_mm_full: list[Optional[float]] = []
     if result.rear_axle_point_id:
-        source_steps = result.full_steps or solver_steps
         trim_index = 0
         if source_steps:
             for idx, step in enumerate(source_steps):
@@ -1328,9 +1455,12 @@ async def compute_bike_kinematics(
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
+        "instant_center_coords": instant_center_coords,
+        "instant_center_rear_body_point_ids": rear_body_point_ids,
         "rear_axle_relative_mm_full": rear_axle_relative_mm_full,
         "leverage_ratio_full": leverage_ratio_full,
         "shock_stroke_mm_full": shock_stroke_mm_full,
+        "instant_center_coords_full": instant_center_coords_full,
     }
 
     kin_doc = {

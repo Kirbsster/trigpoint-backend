@@ -92,10 +92,19 @@ class DisplayControlPoint(BaseModel):
     t: float
     offset: float
 
+class DisplayGeometryPoint(BaseModel):
+    x: Optional[float] = None
+    y: Optional[float] = None
+    point_id: Optional[str] = None
+    local_t: Optional[float] = None
+    local_n: Optional[float] = None
+
 
 class BodyDisplayGeometry(BaseModel):
     version: int = 1
-    interpolation: Literal["pchip"] = "pchip"
+    interpolation: Literal["polyline", "pchip"] = "polyline"
+    anchor_point_ids: List[str] = Field(default_factory=list)
+    points: List[DisplayGeometryPoint] = Field(default_factory=list)
     control_points: List[DisplayControlPoint] = Field(default_factory=list)
 
 
