@@ -33,6 +33,7 @@ class SolverStep(BaseModel):
     shock_length: float            # eye-to-eye at this step (same units as points)
     rear_travel: Optional[float]   # vertical rear axle travel vs initial (same units as points)
     leverage_ratio: Optional[float]  # d(rear_travel)/d(shock_stroke)
+    anti_squat: Optional[float] = None
     points: Dict[str, Tuple[float, float]]  # point.id -> (x, y)
 
 

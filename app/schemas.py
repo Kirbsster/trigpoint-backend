@@ -164,6 +164,7 @@ class KinematicsStep(BaseModel):
     shock_length: float
     rear_travel: Optional[float] = None
     leverage_ratio: Optional[float] = None
+    anti_squat: Optional[float] = None
 
 
 class BikeKinematics(BaseModel):

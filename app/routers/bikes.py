@@ -789,6 +789,317 @@ def _compute_instant_center_series(
     return out
 
 
+_WHEEL_BSD_MM: dict[str, float] = {
+    "24": 507.0,
+    "26": 559.0,
+    "27_5": 584.0,
+    "29": 622.0,
+}
+_TYRE_THICKNESS_MM = 60.0
+_CHAIN_PITCH_MM = 12.7
+
+
+def _parse_optional_finite(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _parse_positive_float(value) -> Optional[float]:
+    parsed = _parse_optional_finite(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _parse_positive_int(value) -> Optional[int]:
+    parsed = _parse_optional_finite(value)
+    if parsed is None:
+        return None
+    rounded = int(round(parsed))
+    if rounded <= 0:
+        return None
+    if abs(parsed - float(rounded)) > 1e-6:
+        return None
+    return rounded
+
+
+def _get_wheel_outer_radius_mm(size_id: Optional[str]) -> Optional[float]:
+    if not size_id:
+        return None
+    bsd = _WHEEL_BSD_MM.get(str(size_id))
+    if bsd is None:
+        return None
+    return bsd * 0.5 + _TYRE_THICKNESS_MM
+
+
+def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
+    if not teeth or teeth <= 0:
+        return None
+    denom = math.sin(math.pi / float(teeth))
+    if not math.isfinite(denom) or denom <= 0:
+        return None
+    pitch_diameter = _CHAIN_PITCH_MM / denom
+    if not math.isfinite(pitch_diameter) or pitch_diameter <= 0:
+        return None
+    return pitch_diameter * 0.5
+
+
+def _compute_top_external_tangent(
+    c1: tuple[float, float],
+    r1: float,
+    c2: tuple[float, float],
+    r2: float,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    if not (r1 > 0 and r2 > 0):
+        return None
+    dx = c2[0] - c1[0]
+    dy = c2[1] - c1[1]
+    dist = math.hypot(dx, dy)
+    if dist <= 1e-9:
+        return None
+    radius_delta = r2 - r1
+    if dist <= abs(radius_delta) + 1e-6:
+        return None
+
+    a = radius_delta / dist
+    b_sq = 1.0 - a * a
+    if b_sq < 0:
+        return None
+    b = math.sqrt(max(0.0, b_sq))
+    inv_dist = 1.0 / dist
+    normals = [
+        (
+            (a * dx - b * dy) * inv_dist,
+            (a * dy + b * dx) * inv_dist,
+        ),
+        (
+            (a * dx + b * dy) * inv_dist,
+            (a * dy - b * dx) * inv_dist,
+        ),
+    ]
+
+    candidates: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+    for nx, ny in normals:
+        p1 = (c1[0] + nx * r1, c1[1] + ny * r1)
+        p2 = (c2[0] + nx * r2, c2[1] + ny * r2)
+        score = p1[1] + p2[1]
+        candidates.append((p1, p2, score))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[2])
+    return candidates[0][0], candidates[0][1]
+
+
+def _intersect_infinite_lines(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> Optional[tuple[float, float]]:
+    x1, y1 = a1
+    x2, y2 = a2
+    x3, y3 = b1
+    x4, y4 = b2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if not math.isfinite(denom) or abs(denom) < 1e-9:
+        return None
+    det_a = x1 * y2 - y1 * x2
+    det_b = x3 * y4 - y3 * x4
+    x = (det_a * (x3 - x4) - (x1 - x2) * det_b) / denom
+    y = (det_a * (y3 - y4) - (y1 - y2) * det_b) / denom
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
+def _intersect_line_with_vertical(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    x_vertical: float,
+) -> Optional[tuple[float, float]]:
+    x1, y1 = a
+    x2, y2 = b
+    dx = x2 - x1
+    if abs(dx) < 1e-9:
+        if abs(x_vertical - x1) < 1e-9:
+            return x_vertical, y1
+        return None
+    t = (x_vertical - x1) / dx
+    y = y1 + t * (y2 - y1)
+    if not math.isfinite(y):
+        return None
+    return x_vertical, y
+
+
+def _rotate_about_anchor(
+    point: tuple[float, float],
+    anchor: tuple[float, float],
+    cos_t: float,
+    sin_t: float,
+) -> tuple[float, float]:
+    dx = point[0] - anchor[0]
+    dy = point[1] - anchor[1]
+    return (
+        anchor[0] + dx * cos_t - dy * sin_t,
+        anchor[1] + dx * sin_t + dy * cos_t,
+    )
+
+
+def _compute_anti_squat_series(
+    steps: list[SolverStep],
+    instant_center_solver: list[dict[str, Optional[float]]],
+    trim_index: int,
+    rear_axle_point_id: Optional[str],
+    front_axle_point_id: Optional[str],
+    bb_point_id: Optional[str],
+    scale_mm_per_px: float,
+    settings: dict,
+) -> list[Optional[float]]:
+    if not steps:
+        return []
+    if not rear_axle_point_id or not front_axle_point_id or not bb_point_id:
+        return []
+    if not (scale_mm_per_px > 0):
+        return []
+
+    chainring_teeth = _parse_positive_int(settings.get("drivetrain_chainring_teeth"))
+    cassette_teeth = _parse_positive_int(settings.get("drivetrain_cassette_teeth"))
+    if not chainring_teeth or not cassette_teeth:
+        return []
+    chainring_radius_mm = _get_sprocket_pitch_radius_mm(chainring_teeth)
+    cassette_radius_mm = _get_sprocket_pitch_radius_mm(cassette_teeth)
+    if not chainring_radius_mm or not cassette_radius_mm:
+        return []
+
+    rear_wheel_size = str(settings.get("rear_wheel_size", "29"))
+    front_wheel_size = str(settings.get("front_wheel_size", "29"))
+    rear_wheel_radius_mm = _get_wheel_outer_radius_mm(rear_wheel_size)
+    front_wheel_radius_mm = _get_wheel_outer_radius_mm(front_wheel_size)
+    if not rear_wheel_radius_mm or not front_wheel_radius_mm:
+        return []
+
+    frame_cg_x_mm = _parse_optional_finite(settings.get("frame_cg_x_mm"))
+    frame_cg_y_mm = _parse_optional_finite(settings.get("frame_cg_y_mm"))
+    frame_mass_kg = _parse_positive_float(settings.get("frame_mass_kg"))
+    rider_cg_x_mm = _parse_optional_finite(settings.get("rider_cg_x_mm"))
+    rider_cg_y_mm = _parse_optional_finite(settings.get("rider_cg_y_mm"))
+    rider_mass_kg = _parse_positive_float(settings.get("rider_mass_kg"))
+    if (
+        frame_cg_x_mm is None
+        or frame_cg_y_mm is None
+        or frame_mass_kg is None
+        or rider_cg_x_mm is None
+        or rider_cg_y_mm is None
+        or rider_mass_kg is None
+    ):
+        return []
+
+    chainring_radius_px = chainring_radius_mm / scale_mm_per_px
+    cassette_radius_px = cassette_radius_mm / scale_mm_per_px
+    rear_wheel_radius_px = rear_wheel_radius_mm / scale_mm_per_px
+    front_wheel_radius_px = front_wheel_radius_mm / scale_mm_per_px
+
+    series: list[Optional[float]] = []
+    start_index = max(0, min(trim_index, len(steps)))
+    for idx in range(start_index, len(steps)):
+        step = steps[idx]
+        rear = step.points.get(rear_axle_point_id)
+        front = step.points.get(front_axle_point_id)
+        bb = step.points.get(bb_point_id)
+        if not rear or not front or not bb:
+            series.append(None)
+            continue
+
+        if idx >= len(instant_center_solver):
+            series.append(None)
+            continue
+        ic = instant_center_solver[idx]
+        x_ic = _parse_optional_finite(ic.get("x") if isinstance(ic, dict) else None)
+        y_ic = _parse_optional_finite(ic.get("y") if isinstance(ic, dict) else None)
+        if x_ic is None or y_ic is None:
+            series.append(None)
+            continue
+
+        rear_xy = (float(rear[0]), float(rear[1]))
+        front_xy = (float(front[0]), float(front[1]))
+        bb_xy = (float(bb[0]), float(bb[1]))
+        ic_xy = (x_ic, y_ic)
+
+        frame_cg = (
+            bb_xy[0] + frame_cg_x_mm / scale_mm_per_px,
+            bb_xy[1] + frame_cg_y_mm / scale_mm_per_px,
+        )
+        rider_cg = (
+            bb_xy[0] + rider_cg_x_mm / scale_mm_per_px,
+            bb_xy[1] + rider_cg_y_mm / scale_mm_per_px,
+        )
+        total_mass = frame_mass_kg + rider_mass_kg
+        if total_mass <= 0:
+            series.append(None)
+            continue
+        combined_cg = (
+            (frame_cg[0] * frame_mass_kg + rider_cg[0] * rider_mass_kg) / total_mass,
+            (frame_cg[1] * frame_mass_kg + rider_cg[1] * rider_mass_kg) / total_mass,
+        )
+
+        rear_contact = (rear_xy[0], rear_xy[1] + rear_wheel_radius_px)
+        front_contact = (front_xy[0], front_xy[1] + front_wheel_radius_px)
+
+        # Level each frame to gravity by making the contact patch line horizontal.
+        gdx = front_contact[0] - rear_contact[0]
+        gdy = front_contact[1] - rear_contact[1]
+        glen = math.hypot(gdx, gdy)
+        if glen <= 1e-9:
+            series.append(None)
+            continue
+        rotate_angle = -math.atan2(gdy, gdx)
+        cos_t = math.cos(rotate_angle)
+        sin_t = math.sin(rotate_angle)
+
+        rear_lvl = _rotate_about_anchor(rear_xy, rear_contact, cos_t, sin_t)
+        front_lvl = _rotate_about_anchor(front_xy, rear_contact, cos_t, sin_t)
+        bb_lvl = _rotate_about_anchor(bb_xy, rear_contact, cos_t, sin_t)
+        ic_lvl = _rotate_about_anchor(ic_xy, rear_contact, cos_t, sin_t)
+        cg_lvl = _rotate_about_anchor(combined_cg, rear_contact, cos_t, sin_t)
+        rear_contact_lvl = _rotate_about_anchor(rear_contact, rear_contact, cos_t, sin_t)
+        front_contact_lvl = _rotate_about_anchor(front_contact, rear_contact, cos_t, sin_t)
+
+        tangent = _compute_top_external_tangent(
+            bb_lvl, chainring_radius_px, rear_lvl, cassette_radius_px
+        )
+        if tangent is None:
+            series.append(None)
+            continue
+        ifc = _intersect_infinite_lines(tangent[0], tangent[1], rear_lvl, ic_lvl)
+        if ifc is None:
+            series.append(None)
+            continue
+        as_point = _intersect_line_with_vertical(
+            rear_contact_lvl, ifc, front_contact_lvl[0]
+        )
+        if as_point is None:
+            series.append(None)
+            continue
+
+        ground_y = rear_contact_lvl[1]
+        cg_height = ground_y - cg_lvl[1]
+        anti_squat_height = ground_y - as_point[1]
+        if cg_height <= 1e-9 or not math.isfinite(anti_squat_height):
+            series.append(None)
+            continue
+        anti_squat = (anti_squat_height / cg_height) * 100.0
+        series.append(float(anti_squat) if math.isfinite(anti_squat) else None)
+
+    return series
+
+
 @router.put("/{bike_id}/geometry", response_model=BikeOut)
 async def update_geometry(
     bike_id: str,
@@ -1240,6 +1551,11 @@ async def compute_bike_kinematics(
     # 1) Scale stroke / length / travel to mm, keep coords in px
     # --------------------------------------------------------
     solver_steps = sorted(result.steps, key=lambda s: s.step_index)
+    full_steps = (
+        sorted(result.full_steps, key=lambda s: s.step_index)
+        if result.full_steps
+        else []
+    )
     scale_mm = scale_mm_per_px  # mm per px
 
     for s in solver_steps:
@@ -1248,6 +1564,13 @@ async def compute_bike_kinematics(
         s.shock_length = s.shock_length * scale_mm   # → mm
         if s.rear_travel is not None:
             s.rear_travel = s.rear_travel * scale_mm # → mm
+    for s in full_steps:
+        s.shock_stroke = s.shock_stroke * scale_mm
+        s.shock_length = s.shock_length * scale_mm
+        if s.rear_travel is not None:
+            s.rear_travel = s.rear_travel * scale_mm
+    if full_steps:
+        result.full_steps = full_steps
 
     rectify_scale = None
     if isinstance(rectify, dict) and rectify.get("scale") is not None:
@@ -1286,7 +1609,7 @@ async def compute_bike_kinematics(
             continue
         instant_center_coords.append(_map_solver_xy_to_image_xy(float(x_ic), float(y_ic)))
 
-    source_steps = result.full_steps or solver_steps
+    source_steps = full_steps or solver_steps
     instant_center_coords_full: list[dict[str, Optional[float]]] = []
     if source_steps:
         instant_center_solver_full = _compute_instant_center_series(source_steps, rear_body_point_ids)
@@ -1312,16 +1635,6 @@ async def compute_bike_kinematics(
     # 3) Build compact kinematics summary (now in mm)
     # --------------------------------------------------------
     kin_steps: list[dict] = []
-    for s in solver_steps:
-        kin_steps.append(
-            {
-                "step_index": s.step_index,
-                "shock_stroke": s.shock_stroke,      # mm
-                "shock_length": s.shock_length,      # mm
-                "rear_travel": s.rear_travel,        # mm
-                "leverage_ratio": s.leverage_ratio,  # dimensionless
-            }
-        )
 
     # Front-end gets the scaled result (mm stroke/travel, px coords)
     result.steps = solver_steps
@@ -1375,8 +1688,12 @@ async def compute_bike_kinematics(
     rear_axle_relative_mm_full: list[list[float]] = []
     leverage_ratio_full: list[Optional[float]] = []
     shock_stroke_mm_full: list[Optional[float]] = []
+    anti_squat_series: list[Optional[float]] = []
+    anti_squat_full: list[Optional[float]] = []
+    trim_index = 0
+    front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
+    bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
     if result.rear_axle_point_id:
-        trim_index = 0
         if source_steps:
             for idx, step in enumerate(source_steps):
                 if step.shock_stroke is not None and step.shock_stroke >= -1e-9:
@@ -1451,15 +1768,52 @@ async def compute_bike_kinematics(
             except Exception:
                 leverage_ratio_series = []
 
+        anti_squat_series = _compute_anti_squat_series(
+            steps=source_steps,
+            instant_center_solver=instant_center_solver_full if source_steps else [],
+            trim_index=trim_index,
+            rear_axle_point_id=result.rear_axle_point_id,
+            front_axle_point_id=front_axle_point_id,
+            bb_point_id=bb_point_id,
+            scale_mm_per_px=scale_mm_per_px,
+            settings=settings,
+        )
+        anti_squat_full = _compute_anti_squat_series(
+            steps=source_steps,
+            instant_center_solver=instant_center_solver_full if source_steps else [],
+            trim_index=0,
+            rear_axle_point_id=result.rear_axle_point_id,
+            front_axle_point_id=front_axle_point_id,
+            bb_point_id=bb_point_id,
+            scale_mm_per_px=scale_mm_per_px,
+            settings=settings,
+        )
+
+    for idx, s in enumerate(solver_steps):
+        anti_squat_val = anti_squat_series[idx] if idx < len(anti_squat_series) else None
+        s.anti_squat = anti_squat_val
+        kin_steps.append(
+            {
+                "step_index": s.step_index,
+                "shock_stroke": s.shock_stroke,      # mm
+                "shock_length": s.shock_length,      # mm
+                "rear_travel": s.rear_travel,        # mm
+                "leverage_ratio": s.leverage_ratio,  # dimensionless
+                "anti_squat": anti_squat_val,        # [%]
+            }
+        )
+
     scaled_outputs = {
         "rear_axle_relative_mm": rear_axle_relative_mm,
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
+        "anti_squat_series": anti_squat_series,
         "instant_center_coords": instant_center_coords,
         "instant_center_rear_body_point_ids": rear_body_point_ids,
         "rear_axle_relative_mm_full": rear_axle_relative_mm_full,
         "leverage_ratio_full": leverage_ratio_full,
         "shock_stroke_mm_full": shock_stroke_mm_full,
+        "anti_squat_full": anti_squat_full,
         "instant_center_coords_full": instant_center_coords_full,
     }
 
