@@ -128,6 +128,19 @@ class PerspectiveCorrection(BaseModel):
 
 ScaleSource = Literal["rear_center", "front_center", "wheelbase", "shock_eye"]
 PerspectiveMode = Literal["off", "front", "rear", "both_ls"]
+ShockType = Literal["air", "coil"]
+
+
+class ShockModel(BaseModel):
+    coil_rate_n_per_mm: float = 70.0
+    coil_preload_n: float = 0.0
+    air_chamber_diameter_mm: float = 42.0
+    air_chamber_length_mm: float = 95.0
+    air_shaft_diameter_mm: float = 12.0
+    air_initial_pressure_psi: float = 170.0
+    air_reference_temp_c: float = 20.0
+    air_cold_temp_c: float = 5.0
+    air_hot_temp_c: float = 45.0
 
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
@@ -137,6 +150,8 @@ class BikeGeometry(BaseModel):
     scale_mm_per_px: float | None = None
     scale_source: ScaleSource | None = None  # which measurement set the scale
     perspective: PerspectiveCorrection | None = None
+    shock_type: ShockType | None = None
+    shock_model: ShockModel | None = None
 
 
 class BikePointsUpdate(BaseModel):
@@ -165,6 +180,8 @@ class KinematicsStep(BaseModel):
     rear_travel: Optional[float] = None
     leverage_ratio: Optional[float] = None
     anti_squat: Optional[float] = None
+    shock_spring_rate: Optional[float] = None
+    rear_wheel_force: Optional[float] = None
 
 
 class BikeKinematics(BaseModel):

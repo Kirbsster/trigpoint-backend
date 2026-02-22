@@ -797,6 +797,19 @@ _WHEEL_BSD_MM: dict[str, float] = {
 }
 _TYRE_THICKNESS_MM = 60.0
 _CHAIN_PITCH_MM = 12.7
+_ATM_PRESSURE_PA = 101325.0
+_PSI_TO_PA = 6894.757293168
+_DEFAULT_SHOCK_MODEL: dict[str, float] = {
+    "coil_rate_n_per_mm": 70.0,
+    "coil_preload_n": 0.0,
+    "air_chamber_diameter_mm": 42.0,
+    "air_chamber_length_mm": 95.0,
+    "air_shaft_diameter_mm": 12.0,
+    "air_initial_pressure_psi": 170.0,
+    "air_reference_temp_c": 20.0,
+    "air_cold_temp_c": 5.0,
+    "air_hot_temp_c": 45.0,
+}
 
 
 def _parse_optional_finite(value) -> Optional[float]:
@@ -849,6 +862,137 @@ def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
     if not math.isfinite(pitch_diameter) or pitch_diameter <= 0:
         return None
     return pitch_diameter * 0.5
+
+
+def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dict[str, float]]:
+    geom = geometry if isinstance(geometry, dict) else {}
+    raw_type = str(geom.get("shock_type") or "").strip().lower()
+    shock_type = raw_type if raw_type in {"air", "coil"} else "air"
+
+    raw_model = geom.get("shock_model")
+    model: dict[str, float] = dict(_DEFAULT_SHOCK_MODEL)
+    if isinstance(raw_model, dict):
+        for key, default_value in _DEFAULT_SHOCK_MODEL.items():
+            value = _parse_optional_finite(raw_model.get(key))
+            if value is None:
+                continue
+            model[key] = value
+
+    if model["coil_rate_n_per_mm"] <= 0:
+        model["coil_rate_n_per_mm"] = _DEFAULT_SHOCK_MODEL["coil_rate_n_per_mm"]
+    if model["air_chamber_diameter_mm"] <= 0:
+        model["air_chamber_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"]
+    if model["air_chamber_length_mm"] <= 0:
+        model["air_chamber_length_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"]
+    if model["air_initial_pressure_psi"] <= 0:
+        model["air_initial_pressure_psi"] = _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"]
+
+    min_shaft = 1.0
+    max_shaft = max(1.0, model["air_chamber_diameter_mm"] - 0.5)
+    if not math.isfinite(model["air_shaft_diameter_mm"]):
+        model["air_shaft_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"]
+    model["air_shaft_diameter_mm"] = max(min_shaft, min(max_shaft, model["air_shaft_diameter_mm"]))
+
+    if model["air_reference_temp_c"] <= -273.0:
+        model["air_reference_temp_c"] = _DEFAULT_SHOCK_MODEL["air_reference_temp_c"]
+    if model["air_cold_temp_c"] <= -273.0:
+        model["air_cold_temp_c"] = _DEFAULT_SHOCK_MODEL["air_cold_temp_c"]
+    if model["air_hot_temp_c"] <= -273.0:
+        model["air_hot_temp_c"] = _DEFAULT_SHOCK_MODEL["air_hot_temp_c"]
+
+    return shock_type, model
+
+
+def _compute_shock_force_and_rate_series(
+    shock_stroke_series_mm: list[Optional[float]],
+    shock_type: str,
+    model: dict[str, float],
+    temp_c: Optional[float] = None,
+) -> tuple[list[Optional[float]], list[Optional[float]]]:
+    force_series: list[Optional[float]] = []
+    rate_series: list[Optional[float]] = []
+    if not shock_stroke_series_mm:
+        return force_series, rate_series
+
+    if shock_type == "coil":
+        rate = max(1e-9, float(model.get("coil_rate_n_per_mm", _DEFAULT_SHOCK_MODEL["coil_rate_n_per_mm"])))
+        preload = float(model.get("coil_preload_n", _DEFAULT_SHOCK_MODEL["coil_preload_n"]))
+        for stroke in shock_stroke_series_mm:
+            s = _parse_optional_finite(stroke)
+            if s is None:
+                force_series.append(None)
+                rate_series.append(None)
+                continue
+            s_clamped = max(0.0, s)
+            force_series.append(preload + rate * s_clamped)
+            rate_series.append(rate)
+        return force_series, rate_series
+
+    d_chamber_mm = max(1e-6, float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])))
+    l_chamber_mm = max(1e-6, float(model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])))
+    d_shaft_mm = max(1e-6, float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])))
+    d_shaft_mm = min(d_shaft_mm, max(1e-6, d_chamber_mm - 0.5))
+    p0_psi = max(1e-6, float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])))
+    t_ref_c = float(model.get("air_reference_temp_c", _DEFAULT_SHOCK_MODEL["air_reference_temp_c"]))
+    t_eval_c = float(temp_c if temp_c is not None else t_ref_c)
+
+    t_ref_k = t_ref_c + 273.15
+    t_eval_k = t_eval_c + 273.15
+    if t_ref_k <= 0 or t_eval_k <= 0:
+        return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
+
+    chamber_area_m2 = math.pi * ((d_chamber_mm * 1e-3) ** 2) * 0.25
+    shaft_area_m2 = math.pi * ((d_shaft_mm * 1e-3) ** 2) * 0.25
+    effective_area_m2 = chamber_area_m2 - shaft_area_m2
+    if not math.isfinite(effective_area_m2) or effective_area_m2 <= 0:
+        return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
+
+    v0_m3 = chamber_area_m2 * (l_chamber_mm * 1e-3)
+    if not math.isfinite(v0_m3) or v0_m3 <= 0:
+        return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
+
+    p0_abs_pa = (p0_psi + 14.6959) * _PSI_TO_PA
+    c_pa_m3 = p0_abs_pa * v0_m3 * (t_eval_k / t_ref_k)
+    min_volume_m3 = v0_m3 * 0.02
+    for stroke in shock_stroke_series_mm:
+        s = _parse_optional_finite(stroke)
+        if s is None:
+            force_series.append(None)
+            rate_series.append(None)
+            continue
+        stroke_m = max(0.0, s) * 1e-3
+        vol_m3 = v0_m3 - effective_area_m2 * stroke_m
+        if vol_m3 <= min_volume_m3:
+            force_series.append(None)
+            rate_series.append(None)
+            continue
+
+        p_abs_pa = c_pa_m3 / vol_m3
+        force_n = (p_abs_pa - _ATM_PRESSURE_PA) * effective_area_m2
+        rate_n_per_mm = (c_pa_m3 * (effective_area_m2 ** 2) / (vol_m3 ** 2)) / 1000.0
+        force_series.append(force_n if math.isfinite(force_n) else None)
+        rate_series.append(rate_n_per_mm if math.isfinite(rate_n_per_mm) else None)
+
+    return force_series, rate_series
+
+
+def _compute_rear_wheel_force_series(
+    leverage_ratio_series: list[Optional[float]],
+    shock_spring_rate_series: list[Optional[float]],
+) -> list[Optional[float]]:
+    length = min(len(leverage_ratio_series), len(shock_spring_rate_series))
+    if length <= 0:
+        return []
+    out: list[Optional[float]] = []
+    for idx in range(length):
+        lev = _parse_optional_finite(leverage_ratio_series[idx])
+        rate = _parse_optional_finite(shock_spring_rate_series[idx])
+        if lev is None or rate is None:
+            out.append(None)
+            continue
+        value = lev * rate
+        out.append(value if math.isfinite(value) else None)
+    return out
 
 
 def _compute_top_external_tangent(
@@ -1690,9 +1834,18 @@ async def compute_bike_kinematics(
     shock_stroke_mm_full: list[Optional[float]] = []
     anti_squat_series: list[Optional[float]] = []
     anti_squat_full: list[Optional[float]] = []
+    shock_force_series: list[Optional[float]] = []
+    shock_spring_rate_series: list[Optional[float]] = []
+    shock_spring_rate_cold_series: list[Optional[float]] = []
+    shock_spring_rate_hot_series: list[Optional[float]] = []
+    rear_wheel_force_series: list[Optional[float]] = []
+    shock_force_full: list[Optional[float]] = []
+    shock_spring_rate_full: list[Optional[float]] = []
+    rear_wheel_force_full: list[Optional[float]] = []
     trim_index = 0
     front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
     bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
+    shock_type, shock_model = _normalize_shock_geometry_config(geom)
     if result.rear_axle_point_id:
         if source_steps:
             for idx, step in enumerate(source_steps):
@@ -1768,6 +1921,42 @@ async def compute_bike_kinematics(
             except Exception:
                 leverage_ratio_series = []
 
+        reference_temp_c = shock_model.get("air_reference_temp_c")
+        cold_temp_c = shock_model.get("air_cold_temp_c")
+        hot_temp_c = shock_model.get("air_hot_temp_c")
+        shock_force_series, shock_spring_rate_series = _compute_shock_force_and_rate_series(
+            shock_stroke_mm_series,
+            shock_type,
+            shock_model,
+            temp_c=reference_temp_c,
+        )
+        _, shock_spring_rate_cold_series = _compute_shock_force_and_rate_series(
+            shock_stroke_mm_series,
+            shock_type,
+            shock_model,
+            temp_c=cold_temp_c,
+        )
+        _, shock_spring_rate_hot_series = _compute_shock_force_and_rate_series(
+            shock_stroke_mm_series,
+            shock_type,
+            shock_model,
+            temp_c=hot_temp_c,
+        )
+        shock_force_full, shock_spring_rate_full = _compute_shock_force_and_rate_series(
+            shock_stroke_mm_full,
+            shock_type,
+            shock_model,
+            temp_c=reference_temp_c,
+        )
+        rear_wheel_force_series = _compute_rear_wheel_force_series(
+            leverage_ratio_series,
+            shock_spring_rate_series,
+        )
+        rear_wheel_force_full = _compute_rear_wheel_force_series(
+            leverage_ratio_full,
+            shock_spring_rate_full,
+        )
+
         anti_squat_series = _compute_anti_squat_series(
             steps=source_steps,
             instant_center_solver=instant_center_solver_full if source_steps else [],
@@ -1791,7 +1980,15 @@ async def compute_bike_kinematics(
 
     for idx, s in enumerate(solver_steps):
         anti_squat_val = anti_squat_series[idx] if idx < len(anti_squat_series) else None
+        shock_rate_val = (
+            shock_spring_rate_series[idx] if idx < len(shock_spring_rate_series) else None
+        )
+        rear_wheel_force_val = (
+            rear_wheel_force_series[idx] if idx < len(rear_wheel_force_series) else None
+        )
         s.anti_squat = anti_squat_val
+        s.shock_spring_rate = shock_rate_val
+        s.rear_wheel_force = rear_wheel_force_val
         kin_steps.append(
             {
                 "step_index": s.step_index,
@@ -1800,6 +1997,8 @@ async def compute_bike_kinematics(
                 "rear_travel": s.rear_travel,        # mm
                 "leverage_ratio": s.leverage_ratio,  # dimensionless
                 "anti_squat": anti_squat_val,        # [%]
+                "shock_spring_rate": shock_rate_val,  # [N/mm]
+                "rear_wheel_force": rear_wheel_force_val,  # [N/mm]
             }
         )
 
@@ -1808,12 +2007,22 @@ async def compute_bike_kinematics(
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
         "anti_squat_series": anti_squat_series,
+        "shock_force_n": shock_force_series,
+        "shock_spring_rate_n_per_mm": shock_spring_rate_series,
+        "shock_spring_rate_cold_n_per_mm": shock_spring_rate_cold_series,
+        "shock_spring_rate_hot_n_per_mm": shock_spring_rate_hot_series,
+        "rear_wheel_force_n_per_mm": rear_wheel_force_series,
+        "shock_type": shock_type,
+        "shock_model": shock_model,
         "instant_center_coords": instant_center_coords,
         "instant_center_rear_body_point_ids": rear_body_point_ids,
         "rear_axle_relative_mm_full": rear_axle_relative_mm_full,
         "leverage_ratio_full": leverage_ratio_full,
         "shock_stroke_mm_full": shock_stroke_mm_full,
         "anti_squat_full": anti_squat_full,
+        "shock_force_n_full": shock_force_full,
+        "shock_spring_rate_n_per_mm_full": shock_spring_rate_full,
+        "rear_wheel_force_n_per_mm_full": rear_wheel_force_full,
         "instant_center_coords_full": instant_center_coords_full,
     }
 
