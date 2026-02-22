@@ -136,6 +136,10 @@ class ShockModel(BaseModel):
     coil_preload_n: float = 0.0
     air_chamber_diameter_mm: float = 42.0
     air_chamber_length_mm: float = 95.0
+    air_negative_chamber_length_mm: float = 35.0
+    air_piston_head_thickness_mm: float = 5.0
+    air_transfer_port_start_mm: float = 2.0
+    air_transfer_port_end_mm: float = 10.0
     air_shaft_diameter_mm: float = 12.0
     air_initial_pressure_psi: float = 170.0
     air_reference_temp_c: float = 20.0

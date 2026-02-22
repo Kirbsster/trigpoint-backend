@@ -818,13 +818,16 @@ _WHEEL_BSD_MM: dict[str, float] = {
 }
 _TYRE_THICKNESS_MM = 60.0
 _CHAIN_PITCH_MM = 12.7
-_ATM_PRESSURE_PA = 101325.0
 _PSI_TO_PA = 6894.757293168
 _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "coil_rate_n_per_mm": 70.0,
     "coil_preload_n": 0.0,
     "air_chamber_diameter_mm": 42.0,
     "air_chamber_length_mm": 95.0,
+    "air_negative_chamber_length_mm": 35.0,
+    "air_piston_head_thickness_mm": 5.0,
+    "air_transfer_port_start_mm": 2.0,
+    "air_transfer_port_end_mm": 10.0,
     "air_shaft_diameter_mm": 12.0,
     "air_initial_pressure_psi": 170.0,
     "air_reference_temp_c": 20.0,
@@ -842,6 +845,10 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "shock_model": {
             "air_chamber_diameter_mm": 38.0,
             "air_chamber_length_mm": 82.0,
+            "air_negative_chamber_length_mm": 26.0,
+            "air_piston_head_thickness_mm": 4.0,
+            "air_transfer_port_start_mm": 0.0,
+            "air_transfer_port_end_mm": 8.0,
             "air_shaft_diameter_mm": 10.0,
             "air_initial_pressure_psi": 185.0,
             "air_reference_temp_c": 20.0,
@@ -861,6 +868,10 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "shock_model": {
             "air_chamber_diameter_mm": 42.0,
             "air_chamber_length_mm": 95.0,
+            "air_negative_chamber_length_mm": 35.0,
+            "air_piston_head_thickness_mm": 5.0,
+            "air_transfer_port_start_mm": 0.0,
+            "air_transfer_port_end_mm": 10.0,
             "air_shaft_diameter_mm": 12.0,
             "air_initial_pressure_psi": 170.0,
             "air_reference_temp_c": 20.0,
@@ -880,6 +891,10 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "shock_model": {
             "air_chamber_diameter_mm": 46.0,
             "air_chamber_length_mm": 112.0,
+            "air_negative_chamber_length_mm": 46.0,
+            "air_piston_head_thickness_mm": 6.0,
+            "air_transfer_port_start_mm": 0.0,
+            "air_transfer_port_end_mm": 12.0,
             "air_shaft_diameter_mm": 14.0,
             "air_initial_pressure_psi": 155.0,
             "air_reference_temp_c": 20.0,
@@ -1013,6 +1028,10 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
         model["air_chamber_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"]
     if model["air_chamber_length_mm"] <= 0:
         model["air_chamber_length_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"]
+    if model["air_negative_chamber_length_mm"] <= 0:
+        model["air_negative_chamber_length_mm"] = _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"]
+    if model["air_piston_head_thickness_mm"] < 0:
+        model["air_piston_head_thickness_mm"] = _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"]
     if model["air_initial_pressure_psi"] <= 0:
         model["air_initial_pressure_psi"] = _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"]
 
@@ -1028,6 +1047,13 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
         model["air_cold_temp_c"] = _DEFAULT_SHOCK_MODEL["air_cold_temp_c"]
     if model["air_hot_temp_c"] <= -273.0:
         model["air_hot_temp_c"] = _DEFAULT_SHOCK_MODEL["air_hot_temp_c"]
+
+    port_start = max(0.0, model["air_transfer_port_start_mm"])
+    port_end = max(0.0, model["air_transfer_port_end_mm"])
+    if port_end < port_start:
+        port_start, port_end = port_end, port_start
+    model["air_transfer_port_start_mm"] = port_start
+    model["air_transfer_port_end_mm"] = port_end
 
     return shock_type, model
 
@@ -1057,11 +1083,62 @@ def _compute_shock_force_and_rate_series(
             rate_series.append(rate)
         return force_series, rate_series
 
-    d_chamber_mm = max(1e-6, float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])))
-    l_chamber_mm = max(1e-6, float(model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])))
-    d_shaft_mm = max(1e-6, float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])))
+    d_chamber_mm = max(
+        1e-6,
+        float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
+    )
+    l_pos_mm = max(
+        1e-6,
+        float(model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])),
+    )
+    l_neg_mm = max(
+        1e-6,
+        float(
+            model.get(
+                "air_negative_chamber_length_mm",
+                _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"],
+            )
+        ),
+    )
+    piston_t_mm = max(
+        0.0,
+        float(
+            model.get(
+                "air_piston_head_thickness_mm",
+                _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"],
+            )
+        ),
+    )
+    d_shaft_mm = max(
+        1e-6,
+        float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])),
+    )
     d_shaft_mm = min(d_shaft_mm, max(1e-6, d_chamber_mm - 0.5))
-    p0_psi = max(1e-6, float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])))
+    p0_psi = max(
+        1e-6,
+        float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])),
+    )
+    port_start_mm = max(
+        0.0,
+        float(
+            model.get(
+                "air_transfer_port_start_mm",
+                _DEFAULT_SHOCK_MODEL["air_transfer_port_start_mm"],
+            )
+        ),
+    )
+    port_end_mm = max(
+        0.0,
+        float(
+            model.get(
+                "air_transfer_port_end_mm",
+                _DEFAULT_SHOCK_MODEL["air_transfer_port_end_mm"],
+            )
+        ),
+    )
+    if port_end_mm < port_start_mm:
+        port_start_mm, port_end_mm = port_end_mm, port_start_mm
+
     t_ref_c = float(model.get("air_reference_temp_c", _DEFAULT_SHOCK_MODEL["air_reference_temp_c"]))
     t_eval_c = float(temp_c if temp_c is not None else t_ref_c)
 
@@ -1076,31 +1153,98 @@ def _compute_shock_force_and_rate_series(
     if not math.isfinite(effective_area_m2) or effective_area_m2 <= 0:
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
-    v0_m3 = chamber_area_m2 * (l_chamber_mm * 1e-3)
-    if not math.isfinite(v0_m3) or v0_m3 <= 0:
+    pos_len_eff_mm = max(1e-3, l_pos_mm - piston_t_mm)
+    neg_len_eff_mm = max(1e-3, l_neg_mm - piston_t_mm)
+    v_pos0_m3 = chamber_area_m2 * (pos_len_eff_mm * 1e-3)
+    v_neg0_m3 = chamber_area_m2 * (neg_len_eff_mm * 1e-3)
+    if not math.isfinite(v_pos0_m3) or not math.isfinite(v_neg0_m3) or v_pos0_m3 <= 0 or v_neg0_m3 <= 0:
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
     p0_abs_pa = (p0_psi + 14.6959) * _PSI_TO_PA
-    c_pa_m3 = p0_abs_pa * v0_m3 * (t_eval_k / t_ref_k)
-    min_volume_m3 = v0_m3 * 0.02
-    for stroke in shock_stroke_series_mm:
-        s = _parse_optional_finite(stroke)
-        if s is None:
-            force_series.append(None)
-            rate_series.append(None)
-            continue
-        stroke_m = max(0.0, s) * 1e-3
-        vol_m3 = v0_m3 - effective_area_m2 * stroke_m
-        if vol_m3 <= min_volume_m3:
-            force_series.append(None)
-            rate_series.append(None)
-            continue
+    temp_ratio = t_eval_k / t_ref_k
+    c_pos0 = p0_abs_pa * v_pos0_m3 * temp_ratio
+    c_neg0 = p0_abs_pa * v_neg0_m3 * temp_ratio
+    min_pos_m3 = v_pos0_m3 * 0.02
+    min_neg_m3 = v_neg0_m3 * 0.02
 
-        p_abs_pa = c_pa_m3 / vol_m3
-        force_n = (p_abs_pa - _ATM_PRESSURE_PA) * effective_area_m2
-        rate_n_per_mm = (c_pa_m3 * (effective_area_m2 ** 2) / (vol_m3 ** 2)) / 1000.0
-        force_series.append(force_n if math.isfinite(force_n) else None)
-        rate_series.append(rate_n_per_mm if math.isfinite(rate_n_per_mm) else None)
+    def _volumes_at(stroke_mm: float) -> tuple[float, float]:
+        stroke_m = max(0.0, float(stroke_mm)) * 1e-3
+        return (
+            v_pos0_m3 - effective_area_m2 * stroke_m,
+            v_neg0_m3 + effective_area_m2 * stroke_m,
+        )
+
+    has_transfer = port_end_mm > port_start_mm + 1e-9
+    c_total_transfer: Optional[float] = None
+    c_pos_after: Optional[float] = None
+    c_neg_after: Optional[float] = None
+    if has_transfer:
+        v_pos_open, v_neg_open = _volumes_at(port_start_mm)
+        if v_pos_open > min_pos_m3 and v_neg_open > min_neg_m3:
+            p_pos_open = c_pos0 / v_pos_open
+            p_neg_open = c_neg0 / v_neg_open
+            if math.isfinite(p_pos_open) and math.isfinite(p_neg_open):
+                c_total_transfer = p_pos_open * v_pos_open + p_neg_open * v_neg_open
+        if c_total_transfer is not None:
+            v_pos_close, v_neg_close = _volumes_at(port_end_mm)
+            if v_pos_close > min_pos_m3 and v_neg_close > min_neg_m3:
+                p_close = c_total_transfer / (v_pos_close + v_neg_close)
+                if math.isfinite(p_close):
+                    c_pos_after = p_close * v_pos_close
+                    c_neg_after = p_close * v_neg_close
+
+    def _force_at(stroke_mm: float) -> Optional[float]:
+        s = max(0.0, float(stroke_mm))
+        v_pos_m3, v_neg_m3 = _volumes_at(s)
+        if v_pos_m3 <= min_pos_m3 or v_neg_m3 <= min_neg_m3:
+            return None
+
+        if has_transfer and c_total_transfer is not None and port_start_mm <= s <= port_end_mm:
+            p_shared = c_total_transfer / (v_pos_m3 + v_neg_m3)
+            p_pos = p_shared
+            p_neg = p_shared
+        elif has_transfer and c_pos_after is not None and c_neg_after is not None and s > port_end_mm:
+            p_pos = c_pos_after / v_pos_m3
+            p_neg = c_neg_after / v_neg_m3
+        else:
+            p_pos = c_pos0 / v_pos_m3
+            p_neg = c_neg0 / v_neg_m3
+
+        if not (math.isfinite(p_pos) and math.isfinite(p_neg)):
+            return None
+        force_n = (p_pos - p_neg) * effective_area_m2
+        return force_n if math.isfinite(force_n) else None
+
+    parsed_strokes: list[Optional[float]] = [
+        (_parse_optional_finite(stroke) if stroke is not None else None)
+        for stroke in shock_stroke_series_mm
+    ]
+
+    for stroke in parsed_strokes:
+        if stroke is None:
+            force_series.append(None)
+            continue
+        force_series.append(_force_at(stroke))
+
+    max_stroke_mm = max((max(0.0, float(s)) for s in parsed_strokes if s is not None), default=0.0)
+    delta_mm = 0.1
+    for stroke in parsed_strokes:
+        if stroke is None:
+            rate_series.append(None)
+            continue
+        s0 = max(0.0, float(stroke))
+        s_minus = max(0.0, s0 - delta_mm)
+        s_plus = min(max_stroke_mm + delta_mm, s0 + delta_mm)
+        if s_plus <= s_minus + 1e-9:
+            rate_series.append(None)
+            continue
+        f_minus = _force_at(s_minus)
+        f_plus = _force_at(s_plus)
+        if f_minus is None or f_plus is None:
+            rate_series.append(None)
+            continue
+        rate = (f_plus - f_minus) / (s_plus - s_minus)
+        rate_series.append(rate if math.isfinite(rate) else None)
 
     return force_series, rate_series
 
