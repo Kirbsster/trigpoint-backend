@@ -142,6 +142,17 @@ class ShockModel(BaseModel):
     air_cold_temp_c: float = 5.0
     air_hot_temp_c: float = 45.0
 
+
+class ShockPresetOut(BaseModel):
+    id: str
+    preset_id: str
+    name: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    shock_type: ShockType = "air"
+    shock_model: ShockModel
+
+
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
     front_center_mm: float | None = None
@@ -152,6 +163,7 @@ class BikeGeometry(BaseModel):
     perspective: PerspectiveCorrection | None = None
     shock_type: ShockType | None = None
     shock_model: ShockModel | None = None
+    shock_preset_id: str | None = None
 
 
 class BikePointsUpdate(BaseModel):

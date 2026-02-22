@@ -28,16 +28,19 @@ from app.schemas import (
     BikeUpdate,
     BikePageSettingsPayload,
     BikePageSettingsOut,
+    ShockPresetOut,
+    ShockModel,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult, SolverStep
 from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
-from app.db import bikes_col, media_items_col, bike_page_settings_col
+from app.db import bikes_col, media_items_col, bike_page_settings_col, shock_presets_col
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
 from app.utils_media import resolve_hero_url, resolve_hero_variant_url
 from app.settings import settings
+from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
@@ -238,6 +241,24 @@ async def list_my_bikes(current_user=Depends(get_current_user)):
         hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
         out.append(bike_doc_to_out(d, hero_url=hero_url, hero_thumb_url=hero_thumb_url))
 
+    return out
+
+
+@router.get("/shock-presets", response_model=List[ShockPresetOut])
+async def list_shock_presets(current_user=Depends(get_current_user)):
+    # Auth-gated so we can evolve this into user/team-owned presets later.
+    _extract_user_oid(current_user)
+    await _ensure_default_shock_presets()
+    cursor = shock_presets_col().find({}).sort(
+        [("sort_order", 1), ("category", 1), ("name", 1), ("preset_id", 1)]
+    )
+    docs = await cursor.to_list(length=500)
+    out: list[ShockPresetOut] = []
+    for doc in docs:
+        try:
+            out.append(_shock_preset_doc_to_out(doc))
+        except Exception:
+            continue
     return out
 
 
@@ -810,6 +831,65 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "air_cold_temp_c": 5.0,
     "air_hot_temp_c": 45.0,
 }
+_DEFAULT_SHOCK_PRESETS: list[dict] = [
+    {
+        "preset_id": "default_xc_air",
+        "name": "Default XC Air",
+        "brand": "Generic",
+        "category": "xc",
+        "shock_type": "air",
+        "sort_order": 10,
+        "shock_model": {
+            "air_chamber_diameter_mm": 38.0,
+            "air_chamber_length_mm": 82.0,
+            "air_shaft_diameter_mm": 10.0,
+            "air_initial_pressure_psi": 185.0,
+            "air_reference_temp_c": 20.0,
+            "air_cold_temp_c": 5.0,
+            "air_hot_temp_c": 45.0,
+            "coil_rate_n_per_mm": 70.0,
+            "coil_preload_n": 0.0,
+        },
+    },
+    {
+        "preset_id": "default_trail_enduro_air",
+        "name": "Default Trail/Enduro Air",
+        "brand": "Generic",
+        "category": "trail_enduro",
+        "shock_type": "air",
+        "sort_order": 20,
+        "shock_model": {
+            "air_chamber_diameter_mm": 42.0,
+            "air_chamber_length_mm": 95.0,
+            "air_shaft_diameter_mm": 12.0,
+            "air_initial_pressure_psi": 170.0,
+            "air_reference_temp_c": 20.0,
+            "air_cold_temp_c": 5.0,
+            "air_hot_temp_c": 45.0,
+            "coil_rate_n_per_mm": 70.0,
+            "coil_preload_n": 0.0,
+        },
+    },
+    {
+        "preset_id": "default_dh_air",
+        "name": "Default DH Air",
+        "brand": "Generic",
+        "category": "dh",
+        "shock_type": "air",
+        "sort_order": 30,
+        "shock_model": {
+            "air_chamber_diameter_mm": 46.0,
+            "air_chamber_length_mm": 112.0,
+            "air_shaft_diameter_mm": 14.0,
+            "air_initial_pressure_psi": 155.0,
+            "air_reference_temp_c": 20.0,
+            "air_cold_temp_c": 5.0,
+            "air_hot_temp_c": 45.0,
+            "coil_rate_n_per_mm": 70.0,
+            "coil_preload_n": 0.0,
+        },
+    },
+]
 
 
 def _parse_optional_finite(value) -> Optional[float]:
@@ -822,6 +902,55 @@ def _parse_optional_finite(value) -> Optional[float]:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+async def _ensure_default_shock_presets():
+    presets = shock_presets_col()
+    now = datetime.utcnow()
+    for preset in _DEFAULT_SHOCK_PRESETS:
+        preset_id = str(preset.get("preset_id") or "").strip()
+        if not preset_id:
+            continue
+        existing = await presets.find_one({"preset_id": preset_id})
+        if existing:
+            continue
+        doc = {
+            "preset_id": preset_id,
+            "name": preset.get("name"),
+            "brand": preset.get("brand"),
+            "category": preset.get("category"),
+            "shock_type": preset.get("shock_type") or "air",
+            "sort_order": int(preset.get("sort_order") or 100),
+            "shock_model": preset.get("shock_model") or dict(_DEFAULT_SHOCK_MODEL),
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            await presets.insert_one(doc)
+        except DuplicateKeyError:
+            continue
+
+
+def _shock_preset_doc_to_out(doc: dict) -> ShockPresetOut:
+    shock_type = str(doc.get("shock_type") or "air").strip().lower()
+    if shock_type not in {"air", "coil"}:
+        shock_type = "air"
+    model_raw = doc.get("shock_model")
+    model = dict(_DEFAULT_SHOCK_MODEL)
+    if isinstance(model_raw, dict):
+        for key in model.keys():
+            value = _parse_optional_finite(model_raw.get(key))
+            if value is not None:
+                model[key] = value
+    return ShockPresetOut(
+        id=str(doc.get("_id")),
+        preset_id=str(doc.get("preset_id") or ""),
+        name=str(doc.get("name") or "Shock Preset"),
+        brand=(str(doc.get("brand")) if doc.get("brand") is not None else None),
+        category=(str(doc.get("category")) if doc.get("category") is not None else None),
+        shock_type=shock_type,  # type: ignore[arg-type]
+        shock_model=ShockModel(**model),
+    )
 
 
 def _parse_positive_float(value) -> Optional[float]:

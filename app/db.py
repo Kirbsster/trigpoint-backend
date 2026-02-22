@@ -44,6 +44,9 @@ def media_items_col():
 def bike_page_settings_col():
     return get_db()["bike_page_settings"]
 
+def shock_presets_col():
+    return get_db()["shock_presets"]
+
 def sheds_col():
     return get_db()["sheds"]
 
@@ -58,9 +61,7 @@ async def ping() -> bool:
 
 
 async def ensure_indexes():
-    db = get_db()
-
-    users = db["users"]
+    users = users_col()
     await users.create_index(
         [("email_norm", 1)],
         unique=True,
@@ -68,13 +69,13 @@ async def ensure_indexes():
         partialFilterExpression={"email_norm": {"$type": "string"}},
     )
 
-    bikes = db["bikes"]
+    bikes = bikes_col()
     await bikes.create_index(
         [("user_id", 1)],
         name="idx_bikes_user_id",
     )
 
-    media = db["media_items"]
+    media = media_items_col()
     await media.create_index(
         [("bike_id", 1)],
         name="idx_media_bike_id",
@@ -84,18 +85,6 @@ async def ensure_indexes():
         name="idx_media_user_id",
     )
 
-def sheds_col():
-    return get_db()["sheds"]
-
-async def ensure_indexes():
-    users = get_db()["users"]
-    await users.create_index(
-        [("email_norm", 1)],
-        unique=True,
-        name="uniq_email_norm",
-        partialFilterExpression={"email_norm": {"$type": "string"}},
-    )
-    # optional: shed indexes
     sheds = sheds_col()
     await sheds.create_index([("owner_id", 1)], name="shed_owner")
     await sheds.create_index(
@@ -109,4 +98,11 @@ async def ensure_indexes():
         [("user_id", 1), ("bike_id", 1)],
         unique=True,
         name="uniq_user_bike_settings",
+    )
+
+    shock_presets = shock_presets_col()
+    await shock_presets.create_index(
+        [("preset_id", 1)],
+        unique=True,
+        name="uniq_shock_preset_id",
     )
