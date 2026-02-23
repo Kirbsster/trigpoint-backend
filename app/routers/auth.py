@@ -1,3 +1,5 @@
+from datetime import datetime
+import re
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Response, BackgroundTasks
 from ..rate_limit import SlidingWindowLimiter, RateLimitExceeded
 from ..security import (verify_password, hash_password, create_access_token, 
@@ -5,14 +7,15 @@ from ..security import (verify_password, hash_password, create_access_token,
                         password_reused, create_verify_token)
 from ..email_utils import send_email, verification_email_html, reset_password_email_html
 from ..settings import settings
-from ..db import get_db
+from ..db import get_db, bikes_col
 from ..schemas import (LoginIn, RegisterIn, TokenPair, UserOut, ForgotPasswordIn,
-                        ResetPasswordIn, ChangePasswordIn)
+                        ResetPasswordIn, ChangePasswordIn, ShareableIdUpdate)
 from ..deps import get_current_user 
 from ..schemas import RegisterOut
 import secrets
 from time import time
 from urllib.parse import quote
+from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -27,6 +30,62 @@ register_limiter_ip = SlidingWindowLimiter(limit=5,  window=60*10)  # 5/10min pe
 
 def _norm_email(e: str) -> str:
     return e.strip().lower()
+
+
+_SHAREABLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,30}[a-z0-9]$")
+
+
+def _normalize_shareable_id(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", (value or "").strip().lower())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
+    return cleaned[:32]
+
+
+def _shareable_seed_from_email(email_norm: str) -> str:
+    local = (email_norm or "").split("@", 1)[0]
+    seed = _normalize_shareable_id(local)
+    if len(seed) < 3:
+        seed = "rider"
+    return seed[:32]
+
+
+async def _mint_unique_shareable_id(users, email_norm: str) -> str:
+    base = _shareable_seed_from_email(email_norm)
+    candidates = [base]
+    for _ in range(24):
+        suffix = secrets.token_hex(2)
+        prefix_len = max(3, 32 - len(suffix) - 1)
+        candidates.append(f"{base[:prefix_len]}-{suffix}")
+
+    for candidate in candidates:
+        if not _SHAREABLE_ID_RE.match(candidate):
+            continue
+        existing = await users.find_one({"shareable_id": candidate}, {"_id": 1})
+        if not existing:
+            return candidate
+
+    return f"rider-{secrets.token_hex(4)}"
+
+
+async def _ensure_user_shareable_id(user: dict) -> str | None:
+    current = user.get("shareable_id")
+    if isinstance(current, str) and _SHAREABLE_ID_RE.match(current):
+        return current
+
+    users = get_db()["users"]
+    email_norm = _norm_email(str(user.get("email") or ""))
+    if not email_norm:
+        return None
+
+    for _ in range(3):
+        candidate = await _mint_unique_shareable_id(users, email_norm)
+        try:
+            await users.update_one({"_id": user["_id"]}, {"$set": {"shareable_id": candidate}})
+            user["shareable_id"] = candidate
+            return candidate
+        except DuplicateKeyError:
+            continue
+    return None
 
 @router.post("/register", response_model=UserOut, status_code=201)
 async def register(payload: RegisterIn, request: Request, background: BackgroundTasks):
@@ -48,6 +107,7 @@ async def register(payload: RegisterIn, request: Request, background: Background
     existing = await users.find_one({"email_norm": email_norm}, {"_id": 1})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+    shareable_id = await _mint_unique_shareable_id(users, email_norm)
 
     verification_nonce = secrets.token_hex(8)
 
@@ -58,6 +118,7 @@ async def register(payload: RegisterIn, request: Request, background: Background
         "password_history": [],
         "role": "user",
         "is_active": True,
+        "shareable_id": shareable_id,
         "email_verified": False,              # NEW
         "verification_nonce": verification_nonce,   # NEW
         "verification_sent_at": int(time()),        # NEW
@@ -92,6 +153,7 @@ async def register(payload: RegisterIn, request: Request, background: Background
         email=doc["email"],
         role=doc["role"],
         is_active=doc["is_active"],
+        shareable_id=doc.get("shareable_id"),
         **dev_echo,
     )
 
@@ -142,15 +204,19 @@ async def guest_login():
     email = "guest@local"
     user = await users.find_one({"email": email})
     if not user:
+        guest_shareable_id = await _mint_unique_shareable_id(users, _norm_email(email))
         user = {
             "email": email,
             "email_norm": _norm_email(email),
             "hashed_password": None,
             "role": "guest",
             "is_active": True,
+            "shareable_id": guest_shareable_id,
             "label": f"guest-{secrets.token_hex(4)}",
         }
         await users.insert_one(user)
+    else:
+        await _ensure_user_shareable_id(user)
 
     access = create_access_token(user["email"], user.get("role", "guest"))
     refresh = create_refresh_token(user["email"], user.get("role", "guest"))
@@ -186,17 +252,64 @@ async def me(access_token: str):
     data = decode_token(access_token)
     if not data or data.get("typ") != "access":
         raise HTTPException(status_code=401, detail="Invalid token")
-    return UserOut(email=data["sub"], role=data.get("role","user"), is_active=True)
-
-def _norm_email(e: str) -> str: return e.strip().lower()
+    users = get_db()["users"]
+    user = await users.find_one({"email_norm": _norm_email(data["sub"])})
+    if not user:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    shareable_id = await _ensure_user_shareable_id(user)
+    return UserOut(
+        email=user["email"],
+        role=user.get("role", data.get("role", "user")),
+        is_active=user.get("is_active", True),
+        shareable_id=shareable_id,
+    )
 
 @router.get("/users/me", response_model=UserOut)
 async def users_me(current_user=Depends(get_current_user)):
     """Return the current authenticated user based on the Authorization header."""
+    shareable_id = await _ensure_user_shareable_id(current_user)
     return UserOut(
         email=current_user["email"],
         role=current_user.get("role", "user"),
         is_active=current_user.get("is_active", True),
+        shareable_id=shareable_id,
+    )
+
+
+@router.put("/users/me/shareable-id", response_model=UserOut)
+async def update_my_shareable_id(payload: ShareableIdUpdate, current_user=Depends(get_current_user)):
+    users = get_db()["users"]
+    candidate = _normalize_shareable_id(payload.shareable_id)
+    if not _SHAREABLE_ID_RE.match(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail="shareable_id must be 3-32 chars, lowercase letters/numbers/_/- and start/end with letter or number",
+        )
+
+    try:
+        await users.update_one({"_id": current_user["_id"]}, {"$set": {"shareable_id": candidate}})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="shareable_id already in use")
+
+    owner_oid = current_user["_id"]
+    await bikes_col().update_many(
+        {
+            "$or": [
+                {"owner_user_id": owner_oid},
+                {"owner_user_id": {"$exists": False}, "user_id": owner_oid},
+            ]
+        },
+        {"$set": {"creator_shareable_id": candidate, "updated_at": datetime.utcnow()}},
+    )
+
+    updated = await users.find_one({"_id": current_user["_id"]})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserOut(
+        email=updated["email"],
+        role=updated.get("role", "user"),
+        is_active=updated.get("is_active", True),
+        shareable_id=updated.get("shareable_id"),
     )
 
 
@@ -371,6 +484,7 @@ async def session_me(request: Request):
     user = await users.find_one({"email_norm": _norm_email(email)})
     if not user or not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="User not active")
+    shareable_id = await _ensure_user_shareable_id(user)
 
     # Optional: also require email_verified here if you like
     # if not user.get("email_verified"):
@@ -385,6 +499,7 @@ async def session_me(request: Request):
             "email": email,
             "role": role,
             "is_active": user.get("is_active", True),
+            "shareable_id": shareable_id,
         },
     }
 

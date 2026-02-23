@@ -76,6 +76,13 @@ def _extract_user_oid(current_user) -> ObjectId:
     return raw_id
 
 
+def _is_bike_owner(doc: dict, user_oid: ObjectId) -> bool:
+    owner_value = doc.get("owner_user_id")
+    if owner_value is None:
+        owner_value = doc.get("user_id")
+    return owner_value == user_oid
+
+
 # ---------- Endpoints ----------
 
 @router.post("", response_model=ShedOut, status_code=status.HTTP_201_CREATED)
@@ -168,7 +175,7 @@ async def add_bike_to_shed(
     bike = await bikes.find_one({"_id": bike_oid})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
-    if bike.get("user_id") != owner_oid:
+    if not _is_bike_owner(bike, owner_oid):
         raise HTTPException(status_code=403, detail="You do not own this bike")
 
     # Add bike if not already present

@@ -32,6 +32,7 @@ class UserOut(BaseModel):
     email: EmailStr
     role: str
     is_active: bool
+    shareable_id: Optional[str] = None
 
 
 class ForgotPasswordIn(BaseModel):
@@ -51,6 +52,10 @@ class ChangePasswordIn(BaseModel):
 class RegisterOut(UserOut):
     verify_token_dev_only: Optional[str] = None
     verify_link_dev_only: Optional[str] = None
+
+
+class ShareableIdUpdate(BaseModel):
+    shareable_id: constr(min_length=3, max_length=32)  # type: ignore
 
 
 class BikeCreate(BaseModel):
@@ -129,6 +134,7 @@ class PerspectiveCorrection(BaseModel):
 ScaleSource = Literal["rear_center", "front_center", "wheelbase", "shock_eye"]
 PerspectiveMode = Literal["off", "front", "rear", "both_ls"]
 ShockType = Literal["air", "coil"]
+BikeVisibility = Literal["private", "public"]
 
 
 class ShockModel(BaseModel):
@@ -213,6 +219,12 @@ class BikeOut(BaseModel):
     model_year: Optional[int] = None
     bike_size: Optional[str] = None
     user_id: str
+    owner_user_id: str
+    creator_shareable_id: Optional[str] = None
+    visibility: BikeVisibility = "private"
+    is_verified: bool = False
+    verified_by_user_id: Optional[str] = None
+    verified_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     hero_media_id: Optional[str] = None
@@ -232,6 +244,11 @@ class BikeUpdate(BaseModel):
     brand: Optional[str] = None
     model_year: Optional[int] = None
     bike_size: Optional[str] = None
+
+
+class BikeAccessUpdate(BaseModel):
+    visibility: Optional[BikeVisibility] = None
+    is_verified: Optional[bool] = None
 
 
 class BikePageSettingsPayload(BaseModel):

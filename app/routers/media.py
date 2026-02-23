@@ -139,6 +139,13 @@ def _extract_user_oid(current_user) -> ObjectId:
     return raw_id
 
 
+def _is_bike_owner(doc: dict, user_oid: ObjectId) -> bool:
+    owner_value = doc.get("owner_user_id")
+    if owner_value is None:
+        owner_value = doc.get("user_id")
+    return owner_value == user_oid
+
+
 @router.post("/{bike_id}/media/hero", response_model=MediaOut, status_code=status.HTTP_201_CREATED)
 async def upload_hero_image(
     bike_id: str,
@@ -163,7 +170,7 @@ async def upload_hero_image(
     user_oid = _extract_user_oid(current_user)
 
     # Ownership check
-    if bike.get("user_id") != user_oid:
+    if not _is_bike_owner(bike, user_oid):
         raise HTTPException(status_code=403, detail="Not your bike")
 
     original_content = await file.read()
@@ -326,7 +333,7 @@ async def delete_hero_image(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     user_oid = _extract_user_oid(current_user)
-    if bike.get("user_id") != user_oid:
+    if not _is_bike_owner(bike, user_oid):
         raise HTTPException(status_code=403, detail="Not your bike")
 
     hero_id = bike.get("hero_media_id")
@@ -367,7 +374,7 @@ async def update_hero_perspective(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     user_oid = _extract_user_oid(current_user)
-    if bike.get("user_id") != user_oid:
+    if not _is_bike_owner(bike, user_oid):
         raise HTTPException(status_code=403, detail="Not your bike")
 
     hero_id = bike.get("hero_media_id")
@@ -410,7 +417,7 @@ async def auto_detect_hero_perspective(
         raise HTTPException(status_code=404, detail="Bike not found")
 
     user_oid = _extract_user_oid(current_user)
-    if bike.get("user_id") != user_oid:
+    if not _is_bike_owner(bike, user_oid):
         raise HTTPException(status_code=403, detail="Not your bike")
 
     hero_id = bike.get("hero_media_id")

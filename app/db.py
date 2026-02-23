@@ -68,11 +68,29 @@ async def ensure_indexes():
         name="uniq_email_norm",
         partialFilterExpression={"email_norm": {"$type": "string"}},
     )
+    await users.create_index(
+        [("shareable_id", 1)],
+        unique=True,
+        name="uniq_shareable_id",
+        partialFilterExpression={"shareable_id": {"$type": "string"}},
+    )
 
     bikes = bikes_col()
     await bikes.create_index(
         [("user_id", 1)],
         name="idx_bikes_user_id",
+    )
+    await bikes.create_index(
+        [("owner_user_id", 1)],
+        name="idx_bikes_owner_user_id",
+    )
+    await bikes.create_index(
+        [("visibility", 1), ("updated_at", -1)],
+        name="idx_bikes_visibility_updated",
+    )
+    await bikes.create_index(
+        [("is_verified", 1), ("updated_at", -1)],
+        name="idx_bikes_verified_updated",
     )
 
     media = media_items_col()

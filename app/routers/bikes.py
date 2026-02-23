@@ -1,6 +1,7 @@
 # app/routers/bikes.py
 import math
 import os
+import re
 from datetime import datetime
 from typing import Optional, List
 import logging
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 from bson import ObjectId
 from app.schemas import (
     BikeCreate,
+    BikeAccessUpdate,
     BikePoint,
     BikePointsUpdate,
     RigidBody,
@@ -34,7 +36,7 @@ from app.schemas import (
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult, SolverStep
 from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
-from app.db import bikes_col, media_items_col, bike_page_settings_col, shock_presets_col
+from app.db import bikes_col, media_items_col, bike_page_settings_col, shock_presets_col, users_col
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
@@ -51,7 +53,16 @@ def bike_doc_to_out(
     hero_perspective_ellipses: Optional[dict] = None,
     hero_perspective_homography: Optional[dict] = None,
     hero_detection_boxes: Optional[dict] = None,
+    creator_shareable_id: Optional[str] = None,
 ) -> BikeOut:
+    owner_raw = doc.get("owner_user_id") if doc.get("owner_user_id") is not None else doc.get("user_id")
+    visibility = str(doc.get("visibility") or "private").strip().lower()
+    if visibility not in {"private", "public"}:
+        visibility = "private"
+    is_verified = bool(doc.get("is_verified", False))
+    if is_verified:
+        visibility = "public"
+
     # normalise points if present
     raw_points = doc.get("points") or []
     points: list[BikePoint] = []
@@ -113,6 +124,20 @@ def bike_doc_to_out(
         bike_size=doc.get("bike_size"),
         # Avoid "None" string if user_id is missing on old docs
         user_id=str(doc["user_id"]) if doc.get("user_id") is not None else "",
+        owner_user_id=str(owner_raw) if owner_raw is not None else "",
+        creator_shareable_id=(
+            creator_shareable_id
+            if creator_shareable_id is not None
+            else doc.get("creator_shareable_id")
+        ),
+        visibility=visibility,  # type: ignore[arg-type]
+        is_verified=is_verified,
+        verified_by_user_id=(
+            str(doc.get("verified_by_user_id"))
+            if doc.get("verified_by_user_id") is not None
+            else None
+        ),
+        verified_at=doc.get("verified_at"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
         hero_media_id=(str(doc["hero_media_id"]) if doc.get("hero_media_id") else None),
@@ -156,6 +181,145 @@ def _extract_user_oid(current_user) -> ObjectId:
 
     # raw_id is already an ObjectId or similar
     return raw_id
+
+
+def _extract_user_role(current_user) -> str:
+    if isinstance(current_user, dict):
+        role = current_user.get("role")
+    else:
+        role = getattr(current_user, "role", None)
+    normalized = str(role or "user").strip().lower()
+    return normalized if normalized else "user"
+
+
+def _is_admin_user(current_user) -> bool:
+    return _extract_user_role(current_user) == "admin"
+
+
+def _owner_filter(user_oid: ObjectId) -> dict:
+    return {
+        "$or": [
+            {"owner_user_id": user_oid},
+            {"owner_user_id": {"$exists": False}, "user_id": user_oid},
+        ]
+    }
+
+
+def _is_bike_owner(doc: dict, user_oid: ObjectId) -> bool:
+    owner_value = doc.get("owner_user_id")
+    if owner_value is None:
+        owner_value = doc.get("user_id")
+    return owner_value == user_oid
+
+
+def _is_bike_public(doc: dict) -> bool:
+    if bool(doc.get("is_verified", False)):
+        return True
+    visibility = str(doc.get("visibility") or "private").strip().lower()
+    return visibility == "public"
+
+
+def _can_view_bike(doc: dict, user_oid: ObjectId, is_admin: bool) -> bool:
+    if is_admin:
+        return True
+    if _is_bike_owner(doc, user_oid):
+        return True
+    return _is_bike_public(doc)
+
+
+def _normalize_shareable_id(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
+    return cleaned[:32] if cleaned else None
+
+
+def _owner_value_from_doc(doc: dict):
+    owner = doc.get("owner_user_id")
+    if owner is None:
+        owner = doc.get("user_id")
+    return owner
+
+
+def _owner_oid_from_doc(doc: dict) -> Optional[ObjectId]:
+    owner = _owner_value_from_doc(doc)
+    if isinstance(owner, ObjectId):
+        return owner
+    if isinstance(owner, str):
+        try:
+            return ObjectId(owner)
+        except Exception:
+            return None
+    return None
+
+
+def _combine_with_and(*queries: dict) -> dict:
+    parts = [q for q in queries if q]
+    if not parts:
+        return {}
+    if len(parts) == 1:
+        return parts[0]
+    return {"$and": parts}
+
+
+async def _creator_filter_query(creator: Optional[str]) -> dict:
+    normalized = _normalize_shareable_id(creator)
+    if not normalized:
+        return {}
+
+    owner_docs = await users_col().find({"shareable_id": normalized}, {"_id": 1}).to_list(length=200)
+    owner_oids = [d["_id"] for d in owner_docs if d.get("_id") is not None]
+    clauses: list[dict] = [{"creator_shareable_id": normalized}]
+    if owner_oids:
+        clauses.extend(
+            [
+                {"owner_user_id": {"$in": owner_oids}},
+                {"owner_user_id": {"$exists": False}, "user_id": {"$in": owner_oids}},
+            ]
+        )
+    return {"$or": clauses}
+
+
+async def _creator_map_for_docs(docs: list[dict]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    unresolved: list[ObjectId] = []
+    seen: set[ObjectId] = set()
+
+    for d in docs:
+        owner_oid = _owner_oid_from_doc(d)
+        if owner_oid is None:
+            continue
+        owner_key = str(owner_oid)
+        creator = d.get("creator_shareable_id")
+        if isinstance(creator, str) and creator.strip():
+            mapping[owner_key] = creator.strip().lower()
+            continue
+        if owner_oid not in seen:
+            unresolved.append(owner_oid)
+            seen.add(owner_oid)
+
+    if unresolved:
+        users = await users_col().find(
+            {"_id": {"$in": unresolved}},
+            {"shareable_id": 1},
+        ).to_list(length=len(unresolved))
+        for user in users:
+            shareable = user.get("shareable_id")
+            if isinstance(shareable, str) and shareable.strip():
+                mapping[str(user["_id"])] = shareable.strip().lower()
+
+    return mapping
+
+
+def _creator_for_doc(doc: dict, creator_by_owner: dict[str, str]) -> Optional[str]:
+    explicit = doc.get("creator_shareable_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower()
+    owner_oid = _owner_oid_from_doc(doc)
+    if owner_oid is None:
+        return None
+    return creator_by_owner.get(str(owner_oid))
 
 
 def _load_perspective_homography(entry: dict | None) -> Optional[dict]:
@@ -211,9 +375,20 @@ async def create_bike(
     now = datetime.utcnow()
 
     user_oid = _extract_user_oid(current_user)
+    creator_shareable_id = None
+    if isinstance(current_user, dict):
+        creator_shareable_id = _normalize_shareable_id(current_user.get("shareable_id"))
+    else:
+        creator_shareable_id = _normalize_shareable_id(getattr(current_user, "shareable_id", None))
 
     doc = {
+        "owner_user_id": user_oid,
         "user_id": user_oid,
+        "creator_shareable_id": creator_shareable_id,
+        "visibility": "private",
+        "is_verified": False,
+        "verified_by_user_id": None,
+        "verified_at": None,
         "name": bike_in.name,
         "brand": bike_in.brand,
         "model_year": bike_in.model_year,
@@ -228,19 +403,93 @@ async def create_bike(
 
 
 @router.get("", response_model=List[BikeOut])
-async def list_my_bikes(current_user=Depends(get_current_user)):
+async def list_my_bikes(
+    creator: Optional[str] = None,
+    current_user=Depends(get_current_user),
+):
     user_oid = _extract_user_oid(current_user)
     bikes = bikes_col()
-    cursor = bikes.find({"user_id": user_oid})
+    creator_filter = await _creator_filter_query(creator)
+    cursor = bikes.find(_combine_with_and(_owner_filter(user_oid), creator_filter))
     docs = await cursor.to_list(length=1000)
+    creator_by_owner = await _creator_map_for_docs(docs)
 
     out: list[BikeOut] = []
     for d in docs:
         hero_id = d.get("hero_media_id")
         hero_url = await resolve_hero_url(hero_id)
         hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
-        out.append(bike_doc_to_out(d, hero_url=hero_url, hero_thumb_url=hero_thumb_url))
+        out.append(
+            bike_doc_to_out(
+                d,
+                hero_url=hero_url,
+                hero_thumb_url=hero_thumb_url,
+                creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+            )
+        )
 
+    return out
+
+
+@router.get("/community", response_model=List[BikeOut])
+async def list_community_bikes(
+    creator: Optional[str] = None,
+    current_user=Depends(get_current_user),
+):
+    # Auth-gated for now; visibility/segregation can be relaxed later if needed.
+    _ = _extract_user_oid(current_user)
+    creator_filter = await _creator_filter_query(creator)
+    cursor = bikes_col().find(
+        _combine_with_and(
+            {"visibility": "public", "$or": [{"is_verified": {"$exists": False}}, {"is_verified": False}]},
+            creator_filter,
+        )
+    ).sort("updated_at", -1)
+    docs = await cursor.to_list(length=1000)
+    creator_by_owner = await _creator_map_for_docs(docs)
+
+    out: list[BikeOut] = []
+    for d in docs:
+        hero_id = d.get("hero_media_id")
+        hero_url = await resolve_hero_url(hero_id)
+        hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+        out.append(
+            bike_doc_to_out(
+                d,
+                hero_url=hero_url,
+                hero_thumb_url=hero_thumb_url,
+                creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+            )
+        )
+    return out
+
+
+@router.get("/official", response_model=List[BikeOut])
+async def list_official_bikes(
+    creator: Optional[str] = None,
+    current_user=Depends(get_current_user),
+):
+    _ = _extract_user_oid(current_user)
+    creator_filter = await _creator_filter_query(creator)
+    cursor = bikes_col().find(
+        _combine_with_and({"is_verified": True}, creator_filter)
+    ).sort("updated_at", -1)
+    docs = await cursor.to_list(length=1000)
+    creator_by_owner = await _creator_map_for_docs(docs)
+
+    out: list[BikeOut] = []
+    for d in docs:
+        hero_id = d.get("hero_media_id")
+        hero_url = await resolve_hero_url(hero_id)
+        hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+        out.append(
+            bike_doc_to_out(
+                d,
+                hero_url=hero_url,
+                hero_thumb_url=hero_thumb_url,
+                creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+            )
+        )
     return out
 
 
@@ -268,15 +517,18 @@ async def get_bike(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(doc, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
@@ -319,13 +571,13 @@ async def update_bike(
 
     bikes = bikes_col()
     result = await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {"$set": {**update_data, "updated_at": datetime.utcnow()}},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Bike not found")
 
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -352,6 +604,76 @@ async def update_bike(
     )
 
 
+@router.put("/{bike_id}/access", response_model=BikeOut)
+async def update_bike_access(
+    bike_id: str,
+    payload: BikeAccessUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    try:
+        oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+
+    bikes = bikes_col()
+    doc = await bikes.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    is_owner = _is_bike_owner(doc, user_oid)
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to change bike access")
+
+    patch: dict = {}
+    has_visibility_change = payload.visibility is not None
+    has_verified_change = payload.is_verified is not None
+    if not (has_visibility_change or has_verified_change):
+        raise HTTPException(status_code=400, detail="No access fields to update")
+
+    current_visibility = str(doc.get("visibility") or "private").strip().lower()
+    if current_visibility not in {"private", "public"}:
+        current_visibility = "private"
+    current_is_verified = bool(doc.get("is_verified", False))
+
+    if has_verified_change:
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Only admin can change verified status")
+        next_verified = bool(payload.is_verified)
+        patch["is_verified"] = next_verified
+        if next_verified:
+            patch["visibility"] = "public"
+            patch["verified_at"] = datetime.utcnow()
+            patch["verified_by_user_id"] = user_oid
+        else:
+            patch["verified_at"] = None
+            patch["verified_by_user_id"] = None
+
+    next_verified_state = (
+        bool(payload.is_verified) if has_verified_change else current_is_verified
+    )
+    if has_visibility_change:
+        next_visibility = str(payload.visibility)
+        if next_verified_state:
+            next_visibility = "public"
+        patch["visibility"] = next_visibility
+
+    if current_is_verified and not is_admin and patch.get("visibility") == "private":
+        raise HTTPException(status_code=403, detail="Verified bikes must stay public")
+
+    patch["updated_at"] = datetime.utcnow()
+    await bikes.update_one({"_id": oid}, {"$set": patch})
+    updated = await bikes.find_one({"_id": oid})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    hero_id = updated.get("hero_media_id")
+    hero_url = await resolve_hero_url(hero_id)
+    hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
+
+
 @router.get("/{bike_id}/page_settings", response_model=BikePageSettingsOut)
 async def get_page_settings(
     bike_id: str,
@@ -364,7 +686,7 @@ async def get_page_settings(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    bike = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -398,7 +720,7 @@ async def update_page_settings(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    bike = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -453,14 +775,14 @@ async def update_bike_points(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
     now = datetime.utcnow()
 
     await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {
             "$set": {
                 "points": [p.dict() for p in payload.points],
@@ -469,7 +791,7 @@ async def update_bike_points(
         },
     )
 
-    updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    updated = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
@@ -496,7 +818,7 @@ async def get_bodies(
 
     bikes = bikes_col()
     doc = await bikes.find_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {"bodies": 1, "_id": 0},
     )
     if not doc:
@@ -545,7 +867,7 @@ async def update_bodies(
     bikes = bikes_col()
 
     result = await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {
             "$set": {
                 "bodies": [b.dict() for b in payload.bodies],
@@ -756,24 +1078,62 @@ def _compute_instant_center_series(
         rows: list[list[float]] = []
         rhs: list[float] = []
 
-        if i <= 0:
-            i0, i1, dt = 0, 1, 1.0
-        elif i >= n_steps - 1:
-            i0, i1, dt = n_steps - 2, n_steps - 1, 1.0
-        else:
-            i0, i1, dt = i - 1, i + 1, 2.0
-
         for pid in ids:
             p_now = steps[i].points.get(pid)
-            p0 = steps[i0].points.get(pid)
-            p1 = steps[i1].points.get(pid)
-            if not p_now or not p0 or not p1:
+            if not p_now:
                 continue
             try:
                 x = float(p_now[0])
                 y = float(p_now[1])
-                vx = (float(p1[0]) - float(p0[0])) / dt
-                vy = (float(p1[1]) - float(p0[1])) / dt
+            except Exception:
+                continue
+
+            try:
+                # Use centered differences for interior steps and 3-point one-sided
+                # stencils at boundaries for better endpoint stability.
+                if n_steps >= 3 and i == 0:
+                    p0 = steps[0].points.get(pid)
+                    p1 = steps[1].points.get(pid)
+                    p2 = steps[2].points.get(pid)
+                    if not p0 or not p1 or not p2:
+                        continue
+                    x0, y0 = float(p0[0]), float(p0[1])
+                    x1, y1 = float(p1[0]), float(p1[1])
+                    x2, y2 = float(p2[0]), float(p2[1])
+                    vx = (-3.0 * x0 + 4.0 * x1 - x2) * 0.5
+                    vy = (-3.0 * y0 + 4.0 * y1 - y2) * 0.5
+                elif n_steps >= 3 and i == (n_steps - 1):
+                    p0 = steps[n_steps - 1].points.get(pid)
+                    p1 = steps[n_steps - 2].points.get(pid)
+                    p2 = steps[n_steps - 3].points.get(pid)
+                    if not p0 or not p1 or not p2:
+                        continue
+                    x0, y0 = float(p0[0]), float(p0[1])
+                    x1, y1 = float(p1[0]), float(p1[1])
+                    x2, y2 = float(p2[0]), float(p2[1])
+                    vx = (3.0 * x0 - 4.0 * x1 + x2) * 0.5
+                    vy = (3.0 * y0 - 4.0 * y1 + y2) * 0.5
+                elif i <= 0:
+                    p0 = steps[0].points.get(pid)
+                    p1 = steps[1].points.get(pid)
+                    if not p0 or not p1:
+                        continue
+                    vx = float(p1[0]) - float(p0[0])
+                    vy = float(p1[1]) - float(p0[1])
+                elif i >= n_steps - 1:
+                    p0 = steps[n_steps - 2].points.get(pid)
+                    p1 = steps[n_steps - 1].points.get(pid)
+                    if not p0 or not p1:
+                        continue
+                    vx = float(p1[0]) - float(p0[0])
+                    vy = float(p1[1]) - float(p0[1])
+                else:
+                    p0 = steps[i - 1].points.get(pid)
+                    p1 = steps[i + 1].points.get(pid)
+                    if not p0 or not p1:
+                        continue
+                    vx = (float(p1[0]) - float(p0[0])) * 0.5
+                    vy = (float(p1[1]) - float(p0[1])) * 0.5
             except Exception:
                 continue
 
@@ -1468,7 +1828,7 @@ async def update_geometry(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    bike = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    bike = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -1498,11 +1858,11 @@ async def update_geometry(
     geometry.update(patch)
 
     await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {"$set": {"geometry": geometry, "updated_at": datetime.utcnow()}},
     )
 
-    updated = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    updated = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
@@ -1737,7 +2097,7 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -2249,7 +2609,7 @@ async def compute_bike_kinematics(
     # 4) Persist into Mongo
     # --------------------------------------------------------
     await bikes.update_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {
             "$set": {
                 "points": new_points,
@@ -2275,7 +2635,7 @@ async def debug_bike(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -2322,7 +2682,7 @@ async def get_cached_bike_kinematics(
 
     bikes = bikes_col()
     doc = await bikes.find_one(
-        {"_id": oid, "user_id": user_oid},
+        {"_id": oid, **_owner_filter(user_oid)},
         {"kinematics": 1, "_id": 0},
     )
     if not doc:
@@ -2331,7 +2691,7 @@ async def get_cached_bike_kinematics(
     kin = doc.get("kinematics")
     if not kin:
         # No cached run yet
-        return BikeKinematicsOut(
+        return BikeKinematics(
             rear_axle_point_id=None,
             n_steps=0,
             driver_stroke=None,
@@ -2363,7 +2723,7 @@ async def delete_bike(
     bikes = bikes_col()
     media_items = media_items_col()
 
-    doc = await bikes.find_one({"_id": oid, "user_id": user_oid})
+    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
 
@@ -2387,5 +2747,5 @@ async def delete_bike(
                 exc,
             )
 
-    await bikes.delete_one({"_id": oid, "user_id": user_oid})
+    await bikes.delete_one({"_id": oid, **_owner_filter(user_oid)})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
