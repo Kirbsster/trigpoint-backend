@@ -826,8 +826,6 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "air_chamber_length_mm": 95.0,
     "air_negative_chamber_length_mm": 35.0,
     "air_piston_head_thickness_mm": 5.0,
-    "air_transfer_port_start_mm": 2.0,
-    "air_transfer_port_end_mm": 10.0,
     "air_shaft_diameter_mm": 12.0,
     "air_initial_pressure_psi": 170.0,
     "air_reference_temp_c": 20.0,
@@ -847,8 +845,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_chamber_length_mm": 82.0,
             "air_negative_chamber_length_mm": 26.0,
             "air_piston_head_thickness_mm": 4.0,
-            "air_transfer_port_start_mm": 0.0,
-            "air_transfer_port_end_mm": 8.0,
             "air_shaft_diameter_mm": 10.0,
             "air_initial_pressure_psi": 185.0,
             "air_reference_temp_c": 20.0,
@@ -870,8 +866,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_chamber_length_mm": 95.0,
             "air_negative_chamber_length_mm": 35.0,
             "air_piston_head_thickness_mm": 5.0,
-            "air_transfer_port_start_mm": 0.0,
-            "air_transfer_port_end_mm": 10.0,
             "air_shaft_diameter_mm": 12.0,
             "air_initial_pressure_psi": 170.0,
             "air_reference_temp_c": 20.0,
@@ -893,8 +887,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_chamber_length_mm": 112.0,
             "air_negative_chamber_length_mm": 46.0,
             "air_piston_head_thickness_mm": 6.0,
-            "air_transfer_port_start_mm": 0.0,
-            "air_transfer_port_end_mm": 12.0,
             "air_shaft_diameter_mm": 14.0,
             "air_initial_pressure_psi": 155.0,
             "air_reference_temp_c": 20.0,
@@ -1048,13 +1040,6 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
     if model["air_hot_temp_c"] <= -273.0:
         model["air_hot_temp_c"] = _DEFAULT_SHOCK_MODEL["air_hot_temp_c"]
 
-    port_start = max(0.0, model["air_transfer_port_start_mm"])
-    port_end = max(0.0, model["air_transfer_port_end_mm"])
-    if port_end < port_start:
-        port_start, port_end = port_end, port_start
-    model["air_transfer_port_start_mm"] = port_start
-    model["air_transfer_port_end_mm"] = port_end
-
     return shock_type, model
 
 
@@ -1118,26 +1103,6 @@ def _compute_shock_force_and_rate_series(
         1e-6,
         float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])),
     )
-    port_start_mm = max(
-        0.0,
-        float(
-            model.get(
-                "air_transfer_port_start_mm",
-                _DEFAULT_SHOCK_MODEL["air_transfer_port_start_mm"],
-            )
-        ),
-    )
-    port_end_mm = max(
-        0.0,
-        float(
-            model.get(
-                "air_transfer_port_end_mm",
-                _DEFAULT_SHOCK_MODEL["air_transfer_port_end_mm"],
-            )
-        ),
-    )
-    if port_end_mm < port_start_mm:
-        port_start_mm, port_end_mm = port_end_mm, port_start_mm
 
     t_ref_c = float(model.get("air_reference_temp_c", _DEFAULT_SHOCK_MODEL["air_reference_temp_c"]))
     t_eval_c = float(temp_c if temp_c is not None else t_ref_c)
@@ -1174,41 +1139,13 @@ def _compute_shock_force_and_rate_series(
             v_neg0_m3 + effective_area_m2 * stroke_m,
         )
 
-    has_transfer = port_end_mm > port_start_mm + 1e-9
-    c_total_transfer: Optional[float] = None
-    c_pos_after: Optional[float] = None
-    c_neg_after: Optional[float] = None
-    if has_transfer:
-        v_pos_open, v_neg_open = _volumes_at(port_start_mm)
-        if v_pos_open > min_pos_m3 and v_neg_open > min_neg_m3:
-            p_pos_open = c_pos0 / v_pos_open
-            p_neg_open = c_neg0 / v_neg_open
-            if math.isfinite(p_pos_open) and math.isfinite(p_neg_open):
-                c_total_transfer = p_pos_open * v_pos_open + p_neg_open * v_neg_open
-        if c_total_transfer is not None:
-            v_pos_close, v_neg_close = _volumes_at(port_end_mm)
-            if v_pos_close > min_pos_m3 and v_neg_close > min_neg_m3:
-                p_close = c_total_transfer / (v_pos_close + v_neg_close)
-                if math.isfinite(p_close):
-                    c_pos_after = p_close * v_pos_close
-                    c_neg_after = p_close * v_neg_close
-
     def _force_at(stroke_mm: float) -> Optional[float]:
         s = max(0.0, float(stroke_mm))
         v_pos_m3, v_neg_m3 = _volumes_at(s)
         if v_pos_m3 <= min_pos_m3 or v_neg_m3 <= min_neg_m3:
             return None
-
-        if has_transfer and c_total_transfer is not None and port_start_mm <= s <= port_end_mm:
-            p_shared = c_total_transfer / (v_pos_m3 + v_neg_m3)
-            p_pos = p_shared
-            p_neg = p_shared
-        elif has_transfer and c_pos_after is not None and c_neg_after is not None and s > port_end_mm:
-            p_pos = c_pos_after / v_pos_m3
-            p_neg = c_neg_after / v_neg_m3
-        else:
-            p_pos = c_pos0 / v_pos_m3
-            p_neg = c_neg0 / v_neg_m3
+        p_pos = c_pos0 / v_pos_m3
+        p_neg = c_neg0 / v_neg_m3
 
         if not (math.isfinite(p_pos) and math.isfinite(p_neg)):
             return None
