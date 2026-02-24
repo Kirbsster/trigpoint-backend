@@ -541,6 +541,48 @@ async def list_official_bikes(
                 hero_thumb_url=hero_thumb_url,
                 creator_shareable_id=_creator_for_doc(d, creator_by_owner),
             )
+    )
+    return out
+
+
+@router.get("/visible", response_model=List[BikeOut])
+async def list_visible_bikes(
+    creator: Optional[str] = None,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    creator_filter = await _creator_filter_query(creator)
+
+    if is_admin:
+        visibility_query = {}
+    else:
+        visibility_query = {
+            "$or": [
+                _owner_filter(user_oid),
+                {"visibility": "public"},
+                {"is_verified": True},
+            ]
+        }
+
+    cursor = bikes_col().find(
+        _combine_with_and(visibility_query, creator_filter)
+    ).sort([("brand", 1), ("model_year", -1), ("updated_at", -1)])
+    docs = await cursor.to_list(length=2000)
+    creator_by_owner = await _creator_map_for_docs(docs)
+
+    out: list[BikeOut] = []
+    for d in docs:
+        hero_id = d.get("hero_media_id")
+        hero_url = await resolve_hero_url(hero_id)
+        hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+        out.append(
+            bike_doc_to_out(
+                d,
+                hero_url=hero_url,
+                hero_thumb_url=hero_thumb_url,
+                creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+            )
         )
     return out
 
