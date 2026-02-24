@@ -221,6 +221,7 @@ class BikeOut(BaseModel):
     user_id: str
     owner_user_id: str
     creator_shareable_id: Optional[str] = None
+    max_rear_travel_mm: Optional[int] = None
     visibility: BikeVisibility = "private"
     is_verified: bool = False
     verified_by_user_id: Optional[str] = None

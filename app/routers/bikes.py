@@ -46,6 +46,57 @@ from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
+
+def _round_to_nearest_10_mm(value: Optional[float]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    rounded = int(round(parsed / 10.0) * 10)
+    if rounded < 0:
+        rounded = 0
+    return rounded
+
+
+def _extract_max_travel_from_relative_series(series) -> Optional[float]:
+    if not isinstance(series, list):
+        return None
+    max_value: Optional[float] = None
+    for row in series:
+        if not (isinstance(row, (list, tuple)) and len(row) >= 2):
+            continue
+        try:
+            value = abs(float(row[1]))
+        except Exception:
+            continue
+        if not math.isfinite(value):
+            continue
+        if max_value is None or value > max_value:
+            max_value = value
+    return max_value
+
+
+def _derive_max_rear_travel_mm(doc: dict) -> Optional[int]:
+    direct = _round_to_nearest_10_mm(doc.get("max_rear_travel_mm"))
+    if direct is not None:
+        return direct
+    kin = doc.get("kinematics")
+    if not isinstance(kin, dict):
+        return None
+    scaled = kin.get("scaled_outputs")
+    if not isinstance(scaled, dict):
+        return None
+    max_trim = _extract_max_travel_from_relative_series(scaled.get("rear_axle_relative_mm"))
+    max_full = _extract_max_travel_from_relative_series(scaled.get("rear_axle_relative_mm_full"))
+    candidates = [v for v in (max_trim, max_full) if v is not None]
+    if not candidates:
+        return None
+    return _round_to_nearest_10_mm(max(candidates))
+
 def bike_doc_to_out(
     doc,
     hero_url: Optional[str] = None,
@@ -130,6 +181,7 @@ def bike_doc_to_out(
             if creator_shareable_id is not None
             else doc.get("creator_shareable_id")
         ),
+        max_rear_travel_mm=_derive_max_rear_travel_mm(doc),
         visibility=visibility,  # type: ignore[arg-type]
         is_verified=is_verified,
         verified_by_user_id=(
@@ -655,6 +707,11 @@ async def update_bike_access(
     )
     if has_visibility_change:
         next_visibility = str(payload.visibility)
+        if is_admin and next_visibility == "public" and not next_verified_state:
+            patch["is_verified"] = True
+            patch["verified_at"] = datetime.utcnow()
+            patch["verified_by_user_id"] = user_oid
+            next_verified_state = True
         if next_verified_state:
             next_visibility = "public"
         patch["visibility"] = next_visibility
@@ -2596,6 +2653,15 @@ async def compute_bike_kinematics(
         "instant_center_coords_full": instant_center_coords_full,
     }
 
+    max_travel_trim = _extract_max_travel_from_relative_series(rear_axle_relative_mm)
+    max_travel_full = _extract_max_travel_from_relative_series(rear_axle_relative_mm_full)
+    max_travel_candidates = [v for v in (max_travel_trim, max_travel_full) if v is not None]
+    max_rear_travel_mm = (
+        _round_to_nearest_10_mm(max(max_travel_candidates))
+        if max_travel_candidates
+        else None
+    )
+
     kin_doc = {
         "rear_axle_point_id": result.rear_axle_point_id,
         "n_steps": len(solver_steps),
@@ -2614,6 +2680,7 @@ async def compute_bike_kinematics(
             "$set": {
                 "points": new_points,
                 "kinematics": kin_doc,
+                "max_rear_travel_mm": max_rear_travel_mm,
                 "updated_at": datetime.utcnow(),
             }
         },
