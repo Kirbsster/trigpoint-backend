@@ -617,6 +617,7 @@ async def get_bike(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
