@@ -105,6 +105,7 @@ def bike_doc_to_out(
     hero_perspective_homography: Optional[dict] = None,
     hero_detection_boxes: Optional[dict] = None,
     creator_shareable_id: Optional[str] = None,
+    can_edit: Optional[bool] = None,
 ) -> BikeOut:
     owner_raw = doc.get("owner_user_id") if doc.get("owner_user_id") is not None else doc.get("user_id")
     visibility = str(doc.get("visibility") or "private").strip().lower()
@@ -181,6 +182,7 @@ def bike_doc_to_out(
             if creator_shareable_id is not None
             else doc.get("creator_shareable_id")
         ),
+        can_edit=bool(can_edit) if can_edit is not None else False,
         max_rear_travel_mm=_derive_max_rear_travel_mm(doc),
         visibility=visibility,  # type: ignore[arg-type]
         is_verified=is_verified,
@@ -451,7 +453,7 @@ async def create_bike(
     bikes = bikes_col()
     result = await bikes.insert_one(doc)
     doc["_id"] = result.inserted_id
-    return bike_doc_to_out(doc)
+    return bike_doc_to_out(doc, can_edit=True)
 
 
 @router.get("", response_model=List[BikeOut])
@@ -477,6 +479,7 @@ async def list_my_bikes(
                 hero_url=hero_url,
                 hero_thumb_url=hero_thumb_url,
                 creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+                can_edit=_is_bike_owner(d, user_oid),
             )
         )
 
@@ -489,7 +492,7 @@ async def list_community_bikes(
     current_user=Depends(get_current_user),
 ):
     # Auth-gated for now; visibility/segregation can be relaxed later if needed.
-    _ = _extract_user_oid(current_user)
+    user_oid = _extract_user_oid(current_user)
     creator_filter = await _creator_filter_query(creator)
     cursor = bikes_col().find(
         _combine_with_and(
@@ -511,6 +514,7 @@ async def list_community_bikes(
                 hero_url=hero_url,
                 hero_thumb_url=hero_thumb_url,
                 creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+                can_edit=_is_bike_owner(d, user_oid),
             )
         )
     return out
@@ -521,7 +525,7 @@ async def list_official_bikes(
     creator: Optional[str] = None,
     current_user=Depends(get_current_user),
 ):
-    _ = _extract_user_oid(current_user)
+    user_oid = _extract_user_oid(current_user)
     creator_filter = await _creator_filter_query(creator)
     cursor = bikes_col().find(
         _combine_with_and({"is_verified": True}, creator_filter)
@@ -540,6 +544,7 @@ async def list_official_bikes(
                 hero_url=hero_url,
                 hero_thumb_url=hero_thumb_url,
                 creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+                can_edit=_is_bike_owner(d, user_oid),
             )
     )
     return out
@@ -582,6 +587,7 @@ async def list_visible_bikes(
                 hero_url=hero_url,
                 hero_thumb_url=hero_thumb_url,
                 creator_shareable_id=_creator_for_doc(d, creator_by_owner),
+                can_edit=_is_bike_owner(d, user_oid),
             )
         )
     return out
@@ -611,7 +617,6 @@ async def get_bike(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
-    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
@@ -644,6 +649,7 @@ async def get_bike(
         hero_perspective_ellipses=hero_perspective_ellipses,
         hero_perspective_homography=hero_perspective_homography,
         hero_detection_boxes=hero_detection_boxes,
+        can_edit=_is_bike_owner(doc, user_oid),
     )
 
 
@@ -695,6 +701,7 @@ async def update_bike(
         hero_perspective_ellipses=hero_perspective_ellipses,
         hero_perspective_homography=hero_perspective_homography,
         hero_detection_boxes=hero_detection_boxes,
+        can_edit=True,
     )
 
 
@@ -770,7 +777,12 @@ async def update_bike_access(
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
-    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
+    return bike_doc_to_out(
+        updated,
+        hero_url=hero_url,
+        hero_thumb_url=hero_thumb_url,
+        can_edit=_is_bike_owner(updated, user_oid),
+    )
 
 
 @router.get("/{bike_id}/page_settings", response_model=BikePageSettingsOut)
@@ -794,18 +806,29 @@ async def get_page_settings(
 
     settings_col = bike_page_settings_col()
     doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
-    if not doc:
-        now = datetime.utcnow()
-        payload = _default_page_settings()
-        doc = {
-            "bike_id": oid,
-            "user_id": user_oid,
-            "created_at": now,
-            "updated_at": now,
-            "settings": payload,
-        }
-        await settings_col.insert_one(doc)
+    if doc:
+        return _page_settings_doc_to_out(doc)
 
+    payload = _default_page_settings()
+    if not _is_bike_owner(bike, user_oid):
+        now = datetime.utcnow()
+        return BikePageSettingsOut(
+            bike_id=bike_id,
+            user_id=str(user_oid),
+            created_at=now,
+            updated_at=now,
+            settings=payload,
+        )
+
+    now = datetime.utcnow()
+    doc = {
+        "bike_id": oid,
+        "user_id": user_oid,
+        "created_at": now,
+        "updated_at": now,
+        "settings": payload,
+    }
+    await settings_col.insert_one(doc)
     return _page_settings_doc_to_out(doc)
 
 
@@ -816,7 +839,6 @@ async def update_page_settings(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
-    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
@@ -826,8 +848,8 @@ async def update_page_settings(
     bike = await bikes.find_one({"_id": oid})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
-    if not _can_view_bike(bike, user_oid, is_admin):
-        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
+    if not _is_bike_owner(bike, user_oid):
+        raise HTTPException(status_code=403, detail="Not allowed to edit settings for this bike")
 
     settings_col = bike_page_settings_col()
     patch = payload.settings or {}
@@ -900,7 +922,7 @@ async def update_bike_points(
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
-    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
+    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url, can_edit=True)
 
 
 @router.get("/{bike_id}/bodies", response_model=BikeBodiesOut)
@@ -915,6 +937,7 @@ async def get_bodies(
     but exposed via its own endpoint so we don't touch the points logic.
     """
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
 
     try:
         oid = ObjectId(bike_id)
@@ -922,14 +945,16 @@ async def get_bodies(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one(
-        {"_id": oid, **_owner_filter(user_oid)},
-        {"bodies": 1, "_id": 0},
+    bike_doc = await bikes.find_one(
+        {"_id": oid},
+        {"bodies": 1, "_id": 1, "owner_user_id": 1, "user_id": 1, "visibility": 1, "is_verified": 1},
     )
-    if not doc:
+    if not bike_doc:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(bike_doc, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
-    raw_bodies = doc.get("bodies") or []
+    raw_bodies = bike_doc.get("bodies") or []
     bodies: List[RigidBody] = []
     for b in raw_bodies:
         try:
@@ -1971,7 +1996,7 @@ async def update_geometry(
     hero_id = updated.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
-    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url)
+    return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url, can_edit=True)
 
 
 # @router.put("/{bike_id}/rear_center", response_model=BikeOut)
