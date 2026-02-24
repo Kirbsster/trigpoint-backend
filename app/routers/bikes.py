@@ -779,15 +779,18 @@ async def get_page_settings(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    bike = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
+    bike = await bikes.find_one({"_id": oid})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(bike, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
     settings_col = bike_page_settings_col()
     doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
@@ -813,15 +816,18 @@ async def update_page_settings(
     current_user=Depends(get_current_user),
 ):
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
     try:
         oid = ObjectId(bike_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    bike = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
+    bike = await bikes.find_one({"_id": oid})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(bike, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
     settings_col = bike_page_settings_col()
     patch = payload.settings or {}
@@ -2188,6 +2194,7 @@ async def compute_bike_kinematics(
       all in mm.
     """
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
 
     # Parse bike_id → ObjectId
     try:
@@ -2196,9 +2203,12 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
+    doc = await bikes.find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(doc, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
+    is_owner = _is_bike_owner(doc, user_oid)
 
     # ---- Extract / validate points ----
     raw_points = doc.get("points") or []
@@ -2716,17 +2726,18 @@ async def compute_bike_kinematics(
     # --------------------------------------------------------
     # 4) Persist into Mongo
     # --------------------------------------------------------
-    await bikes.update_one(
-        {"_id": oid, **_owner_filter(user_oid)},
-        {
-            "$set": {
-                "points": new_points,
-                "kinematics": kin_doc,
-                "max_rear_travel_mm": max_rear_travel_mm,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-    )
+    if is_owner:
+        await bikes.update_one(
+            {"_id": oid, **_owner_filter(user_oid)},
+            {
+                "$set": {
+                    "points": new_points,
+                    "kinematics": kin_doc,
+                    "max_rear_travel_mm": max_rear_travel_mm,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
 
     result.scaled_outputs = scaled_outputs
     return result
@@ -2783,6 +2794,7 @@ async def get_cached_bike_kinematics(
     This reads doc["kinematics"] written by /{bike_id}/kinematics.
     """
     user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
 
     try:
         oid = ObjectId(bike_id)
@@ -2790,12 +2802,11 @@ async def get_cached_bike_kinematics(
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
     bikes = bikes_col()
-    doc = await bikes.find_one(
-        {"_id": oid, **_owner_filter(user_oid)},
-        {"kinematics": 1, "_id": 0},
-    )
+    doc = await bikes.find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
+    if not _can_view_bike(doc, user_oid, is_admin):
+        raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
     kin = doc.get("kinematics")
     if not kin:
