@@ -25,6 +25,12 @@ class ShedCreate(BaseModel):
     visibility: str = Field("private", pattern="^(private|unlisted|public)$")
 
 
+class ShedUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = None
+    visibility: Optional[str] = Field(default=None, pattern="^(private|unlisted|public)$")
+
+
 class ShedOut(BaseModel):
     id: str
     name: str
@@ -145,6 +151,40 @@ async def get_shed(
     return shed_doc_to_out(doc)
 
 
+@router.patch("/{shed_id}", response_model=ShedOut)
+async def update_shed(
+    shed_id: str,
+    payload: ShedUpdate,
+    current_user=Depends(get_current_user),
+):
+    """Update shed metadata (name/description/visibility)."""
+    sheds = sheds_col()
+    try:
+        shed_oid = ObjectId(shed_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid shed_id")
+
+    owner_oid = _extract_user_oid(current_user)
+    existing = await sheds.find_one({"_id": shed_oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Shed not found")
+    if existing.get("owner_id") != owner_oid:
+        raise HTTPException(status_code=403, detail="Not your shed")
+
+    patch = payload.dict(exclude_unset=True)
+    if "name" in patch and isinstance(patch["name"], str):
+        patch["name"] = patch["name"].strip()
+        if not patch["name"]:
+            raise HTTPException(status_code=400, detail="Shed name cannot be empty")
+    if not patch:
+        return shed_doc_to_out(existing)
+
+    patch["updated_at"] = datetime.utcnow()
+    await sheds.update_one({"_id": shed_oid}, {"$set": patch})
+    updated = await sheds.find_one({"_id": shed_oid})
+    return shed_doc_to_out(updated)
+
+
 @router.post("/{shed_id}/bikes/{bike_id}", response_model=ShedOut)
 async def add_bike_to_shed(
     shed_id: str,
@@ -171,11 +211,15 @@ async def add_bike_to_shed(
     if shed.get("owner_id") != owner_oid:
         raise HTTPException(status_code=403, detail="Not your shed")
 
-    # Ensure bike exists and belongs to the same user
+    # Ensure bike exists and can be added:
+    # - owner bikes always allowed
+    # - public / verified bikes can be curated in a private shed
     bike = await bikes.find_one({"_id": bike_oid})
     if not bike:
         raise HTTPException(status_code=404, detail="Bike not found")
-    if not _is_bike_owner(bike, owner_oid):
+    bike_visibility = str(bike.get("visibility") or "private").strip().lower()
+    bike_is_public = bike_visibility == "public" or bool(bike.get("is_verified", False))
+    if not (_is_bike_owner(bike, owner_oid) or bike_is_public):
         raise HTTPException(status_code=403, detail="You do not own this bike")
 
     # Add bike if not already present
