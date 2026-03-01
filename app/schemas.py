@@ -107,7 +107,7 @@ class DisplayGeometryPoint(BaseModel):
 
 class BodyDisplayGeometry(BaseModel):
     version: int = 1
-    interpolation: Literal["polyline", "pchip"] = "polyline"
+    interpolation: Literal["polyline", "spline", "pchip"] = "polyline"
     anchor_point_ids: List[str] = Field(default_factory=list)
     points: List[DisplayGeometryPoint] = Field(default_factory=list)
     control_points: List[DisplayControlPoint] = Field(default_factory=list)

@@ -15,6 +15,7 @@ from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
 from app.utils_media import resolve_hero_url
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
+SHED_MAX_BIKES = 6
 
 
 # ---------- Pydantic models ----------
@@ -60,6 +61,15 @@ def shed_doc_to_out(doc) -> ShedOut:
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
+
+async def _existing_bike_count_for_ids(bike_ids: List[ObjectId]) -> int:
+    if not bike_ids:
+        return 0
+    bikes = bikes_col()
+    try:
+        return int(await bikes.count_documents({"_id": {"$in": bike_ids}}))
+    except Exception:
+        return 0
 
 
 def _extract_user_oid(current_user) -> ObjectId:
@@ -125,7 +135,13 @@ async def list_my_sheds(current_user=Depends(get_current_user)):
     sheds = sheds_col()
     cursor = sheds.find({"owner_id": owner_oid}).sort("created_at", 1)
     docs = await cursor.to_list(length=1000)
-    return [shed_doc_to_out(d) for d in docs]
+    out: List[ShedOut] = []
+    for d in docs:
+        model = shed_doc_to_out(d)
+        bike_ids = d.get("bike_ids", []) or []
+        model.bike_count = await _existing_bike_count_for_ids(bike_ids)
+        out.append(model)
+    return out
 
 
 @router.get("/{shed_id}", response_model=ShedOut)
@@ -148,7 +164,10 @@ async def get_shed(
     if doc.get("owner_id") != owner_oid:
         raise HTTPException(status_code=403, detail="Not your shed")
 
-    return shed_doc_to_out(doc)
+    model = shed_doc_to_out(doc)
+    bike_ids = doc.get("bike_ids", []) or []
+    model.bike_count = await _existing_bike_count_for_ids(bike_ids)
+    return model
 
 
 @router.patch("/{shed_id}", response_model=ShedOut)
@@ -222,7 +241,16 @@ async def add_bike_to_shed(
     if not (_is_bike_owner(bike, owner_oid) or bike_is_public):
         raise HTTPException(status_code=403, detail="You do not own this bike")
 
-    # Add bike if not already present
+    # Enforce max bikes per shed.
+    existing_bike_ids = shed.get("bike_ids", []) or []
+    already_present = bike_oid in existing_bike_ids
+    if (not already_present) and len(existing_bike_ids) >= SHED_MAX_BIKES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Shed already has {SHED_MAX_BIKES} bikes (maximum).",
+        )
+
+    # Add bike if not already present.
     await sheds.update_one(
         {"_id": shed_oid},
         {
