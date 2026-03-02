@@ -118,6 +118,7 @@ class RigidBody(BaseModel):
     name: Optional[str] = None
     point_ids: List[str] = Field(default_factory=list)
     type: Optional[str] = None          # "bar" | "shock" | ...
+    brake_caliper_point_id: Optional[str] = None  # optional rear-brake caliper anchor point id
     closed: bool = False                # for loops (probably False for linkages)
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
@@ -200,6 +201,7 @@ class KinematicsStep(BaseModel):
     rear_travel: Optional[float] = None
     leverage_ratio: Optional[float] = None
     anti_squat: Optional[float] = None
+    anti_rise: Optional[float] = None
     shock_spring_rate: Optional[float] = None
     rear_wheel_force: Optional[float] = None
 

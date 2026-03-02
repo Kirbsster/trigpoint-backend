@@ -1186,6 +1186,57 @@ def _pick_rear_body_point_ids(
     return []
 
 
+def _pick_rear_brake_caliper_point_id(
+    bodies: list[RigidBody],
+    rear_axle_point_id: Optional[str],
+    points: list[BikePoint],
+) -> Optional[str]:
+    """Pick brake caliper point id from the unsprung body carrying the rear axle."""
+    if not rear_axle_point_id:
+        return None
+
+    point_type_by_id: dict[str, str] = {}
+    for point in points or []:
+        pid = getattr(point, "id", None)
+        ptype = getattr(point, "type", None)
+        if pid:
+            point_type_by_id[str(pid)] = str(ptype or "")
+
+    candidate_bodies: list[RigidBody] = []
+    for body in bodies or []:
+        if not isinstance(body, RigidBody):
+            continue
+        if body.type in ("shock", "fixed"):
+            continue
+        pids = [str(pid) for pid in (body.point_ids or []) if pid]
+        if rear_axle_point_id in pids:
+            candidate_bodies.append(body)
+
+    # Primary: explicit body attachment field.
+    for body in candidate_bodies:
+        caliper_id = getattr(body, "brake_caliper_point_id", None)
+        if not caliper_id:
+            continue
+        caliper_id = str(caliper_id)
+        if point_type_by_id.get(caliper_id) == "brake_caliper":
+            return caliper_id
+
+    # Fallback: first brake_caliper point inside same unsprung body point_ids.
+    for body in candidate_bodies:
+        for pid in (body.point_ids or []):
+            pid_s = str(pid)
+            if point_type_by_id.get(pid_s) == "brake_caliper":
+                return pid_s
+
+    # Final fallback: unique global brake_caliper point.
+    global_calipers = [
+        pid for pid, ptype in point_type_by_id.items() if str(ptype) == "brake_caliper"
+    ]
+    if len(global_calipers) == 1:
+        return global_calipers[0]
+    return None
+
+
 def _compute_instant_center_series(
     steps: list[SolverStep],
     body_point_ids: list[str],
@@ -1947,6 +1998,145 @@ def _compute_anti_squat_series(
     return series
 
 
+def _compute_anti_rise_series(
+    steps: list[SolverStep],
+    instant_center_solver: list[dict[str, Optional[float]]],
+    trim_index: int,
+    rear_axle_point_id: Optional[str],
+    front_axle_point_id: Optional[str],
+    bb_point_id: Optional[str],
+    brake_caliper_point_id: Optional[str],
+    scale_mm_per_px: float,
+    settings: dict,
+) -> list[Optional[float]]:
+    if not steps:
+        return []
+    if (
+        not rear_axle_point_id
+        or not front_axle_point_id
+        or not bb_point_id
+        or not brake_caliper_point_id
+    ):
+        return []
+    if not (scale_mm_per_px > 0):
+        return []
+
+    rear_wheel_size = str(settings.get("rear_wheel_size", "29"))
+    front_wheel_size = str(settings.get("front_wheel_size", "29"))
+    rear_wheel_radius_mm = _get_wheel_outer_radius_mm(rear_wheel_size)
+    front_wheel_radius_mm = _get_wheel_outer_radius_mm(front_wheel_size)
+    if not rear_wheel_radius_mm or not front_wheel_radius_mm:
+        return []
+
+    frame_cg_x_mm = _parse_optional_finite(settings.get("frame_cg_x_mm"))
+    frame_cg_y_mm = _parse_optional_finite(settings.get("frame_cg_y_mm"))
+    frame_mass_kg = _parse_positive_float(settings.get("frame_mass_kg"))
+    rider_cg_x_mm = _parse_optional_finite(settings.get("rider_cg_x_mm"))
+    rider_cg_y_mm = _parse_optional_finite(settings.get("rider_cg_y_mm"))
+    rider_mass_kg = _parse_positive_float(settings.get("rider_mass_kg"))
+    if (
+        frame_cg_x_mm is None
+        or frame_cg_y_mm is None
+        or frame_mass_kg is None
+        or rider_cg_x_mm is None
+        or rider_cg_y_mm is None
+        or rider_mass_kg is None
+    ):
+        return []
+
+    rear_wheel_radius_px = rear_wheel_radius_mm / scale_mm_per_px
+    front_wheel_radius_px = front_wheel_radius_mm / scale_mm_per_px
+
+    series: list[Optional[float]] = []
+    start_index = max(0, min(trim_index, len(steps)))
+    for idx in range(start_index, len(steps)):
+        step = steps[idx]
+        rear = step.points.get(rear_axle_point_id)
+        front = step.points.get(front_axle_point_id)
+        bb = step.points.get(bb_point_id)
+        caliper = step.points.get(brake_caliper_point_id)
+        if not rear or not front or not bb or not caliper:
+            series.append(None)
+            continue
+
+        if idx >= len(instant_center_solver):
+            series.append(None)
+            continue
+        ic = instant_center_solver[idx]
+        x_ic = _parse_optional_finite(ic.get("x") if isinstance(ic, dict) else None)
+        y_ic = _parse_optional_finite(ic.get("y") if isinstance(ic, dict) else None)
+        if x_ic is None or y_ic is None:
+            series.append(None)
+            continue
+
+        rear_xy = (float(rear[0]), float(rear[1]))
+        front_xy = (float(front[0]), float(front[1]))
+        bb_xy = (float(bb[0]), float(bb[1]))
+        caliper_xy = (float(caliper[0]), float(caliper[1]))
+        ic_xy = (x_ic, y_ic)
+
+        frame_cg = (
+            bb_xy[0] + frame_cg_x_mm / scale_mm_per_px,
+            bb_xy[1] + frame_cg_y_mm / scale_mm_per_px,
+        )
+        rider_cg = (
+            bb_xy[0] + rider_cg_x_mm / scale_mm_per_px,
+            bb_xy[1] + rider_cg_y_mm / scale_mm_per_px,
+        )
+        total_mass = frame_mass_kg + rider_mass_kg
+        if total_mass <= 0:
+            series.append(None)
+            continue
+        combined_cg = (
+            (frame_cg[0] * frame_mass_kg + rider_cg[0] * rider_mass_kg) / total_mass,
+            (frame_cg[1] * frame_mass_kg + rider_cg[1] * rider_mass_kg) / total_mass,
+        )
+
+        rear_contact = (rear_xy[0], rear_xy[1] + rear_wheel_radius_px)
+        front_contact = (front_xy[0], front_xy[1] + front_wheel_radius_px)
+
+        # Level each frame to gravity by making the contact patch line horizontal.
+        gdx = front_contact[0] - rear_contact[0]
+        gdy = front_contact[1] - rear_contact[1]
+        glen = math.hypot(gdx, gdy)
+        if glen <= 1e-9:
+            series.append(None)
+            continue
+        rotate_angle = -math.atan2(gdy, gdx)
+        cos_t = math.cos(rotate_angle)
+        sin_t = math.sin(rotate_angle)
+
+        rear_lvl = _rotate_about_anchor(rear_xy, rear_contact, cos_t, sin_t)
+        front_lvl = _rotate_about_anchor(front_xy, rear_contact, cos_t, sin_t)
+        _ = rear_lvl  # explicit symmetry with anti-squat flow
+        _ = front_lvl
+        ic_lvl = _rotate_about_anchor(ic_xy, rear_contact, cos_t, sin_t)
+        cg_lvl = _rotate_about_anchor(combined_cg, rear_contact, cos_t, sin_t)
+        caliper_lvl = _rotate_about_anchor(caliper_xy, rear_contact, cos_t, sin_t)
+        rear_contact_lvl = _rotate_about_anchor(rear_contact, rear_contact, cos_t, sin_t)
+        front_contact_lvl = _rotate_about_anchor(front_contact, rear_contact, cos_t, sin_t)
+
+        # Braking transfer line approximation:
+        # direction of caliper reaction through current rear-body instant center.
+        ar_point = _intersect_line_with_vertical(
+            caliper_lvl, ic_lvl, front_contact_lvl[0]
+        )
+        if ar_point is None:
+            series.append(None)
+            continue
+
+        ground_y = rear_contact_lvl[1]
+        cg_height = ground_y - cg_lvl[1]
+        anti_rise_height = ground_y - ar_point[1]
+        if cg_height <= 1e-9 or not math.isfinite(anti_rise_height):
+            series.append(None)
+            continue
+        anti_rise = (anti_rise_height / cg_height) * 100.0
+        series.append(float(anti_rise) if math.isfinite(anti_rise) else None)
+
+    return series
+
+
 @router.put("/{bike_id}/geometry", response_model=BikeOut)
 async def update_geometry(
     bike_id: str,
@@ -2532,6 +2722,11 @@ async def compute_bike_kinematics(
         "point_count": len(points),
         "body_count": len(bodies),
         "rear_axle_steps": rear_axle_steps,
+        "rear_brake_caliper_point_id": _pick_rear_brake_caliper_point_id(
+            bodies,
+            result.rear_axle_point_id,
+            points,
+        ),
     }
     rear_axle_relative_mm: list[list[float]] = []
     leverage_ratio_series: list[Optional[float]] = []
@@ -2541,6 +2736,8 @@ async def compute_bike_kinematics(
     shock_stroke_mm_full: list[Optional[float]] = []
     anti_squat_series: list[Optional[float]] = []
     anti_squat_full: list[Optional[float]] = []
+    anti_rise_series: list[Optional[float]] = []
+    anti_rise_full: list[Optional[float]] = []
     shock_force_series: list[Optional[float]] = []
     shock_spring_rate_series: list[Optional[float]] = []
     shock_spring_rate_cold_series: list[Optional[float]] = []
@@ -2552,6 +2749,11 @@ async def compute_bike_kinematics(
     trim_index = 0
     front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
     bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
+    brake_caliper_point_id = _pick_rear_brake_caliper_point_id(
+        bodies,
+        result.rear_axle_point_id,
+        points,
+    )
     shock_type, shock_model = _normalize_shock_geometry_config(geom)
     if result.rear_axle_point_id:
         if source_steps:
@@ -2684,9 +2886,32 @@ async def compute_bike_kinematics(
             scale_mm_per_px=scale_mm_per_px,
             settings=settings,
         )
+        anti_rise_series = _compute_anti_rise_series(
+            steps=source_steps,
+            instant_center_solver=instant_center_solver_full if source_steps else [],
+            trim_index=trim_index,
+            rear_axle_point_id=result.rear_axle_point_id,
+            front_axle_point_id=front_axle_point_id,
+            bb_point_id=bb_point_id,
+            brake_caliper_point_id=brake_caliper_point_id,
+            scale_mm_per_px=scale_mm_per_px,
+            settings=settings,
+        )
+        anti_rise_full = _compute_anti_rise_series(
+            steps=source_steps,
+            instant_center_solver=instant_center_solver_full if source_steps else [],
+            trim_index=0,
+            rear_axle_point_id=result.rear_axle_point_id,
+            front_axle_point_id=front_axle_point_id,
+            bb_point_id=bb_point_id,
+            brake_caliper_point_id=brake_caliper_point_id,
+            scale_mm_per_px=scale_mm_per_px,
+            settings=settings,
+        )
 
     for idx, s in enumerate(solver_steps):
         anti_squat_val = anti_squat_series[idx] if idx < len(anti_squat_series) else None
+        anti_rise_val = anti_rise_series[idx] if idx < len(anti_rise_series) else None
         shock_rate_val = (
             shock_spring_rate_series[idx] if idx < len(shock_spring_rate_series) else None
         )
@@ -2694,6 +2919,7 @@ async def compute_bike_kinematics(
             rear_wheel_force_series[idx] if idx < len(rear_wheel_force_series) else None
         )
         s.anti_squat = anti_squat_val
+        s.anti_rise = anti_rise_val
         s.shock_spring_rate = shock_rate_val
         s.rear_wheel_force = rear_wheel_force_val
         kin_steps.append(
@@ -2704,6 +2930,7 @@ async def compute_bike_kinematics(
                 "rear_travel": s.rear_travel,        # mm
                 "leverage_ratio": s.leverage_ratio,  # dimensionless
                 "anti_squat": anti_squat_val,        # [%]
+                "anti_rise": anti_rise_val,          # [%]
                 "shock_spring_rate": shock_rate_val,  # [N/mm]
                 "rear_wheel_force": rear_wheel_force_val,  # [N/mm]
             }
@@ -2714,6 +2941,7 @@ async def compute_bike_kinematics(
         "leverage_ratio": leverage_ratio_series,
         "shock_stroke_mm": shock_stroke_mm_series,
         "anti_squat_series": anti_squat_series,
+        "anti_rise_series": anti_rise_series,
         "shock_force_n": shock_force_series,
         "shock_spring_rate_n_per_mm": shock_spring_rate_series,
         "shock_spring_rate_cold_n_per_mm": shock_spring_rate_cold_series,
@@ -2727,10 +2955,12 @@ async def compute_bike_kinematics(
         "leverage_ratio_full": leverage_ratio_full,
         "shock_stroke_mm_full": shock_stroke_mm_full,
         "anti_squat_full": anti_squat_full,
+        "anti_rise_full": anti_rise_full,
         "shock_force_n_full": shock_force_full,
         "shock_spring_rate_n_per_mm_full": shock_spring_rate_full,
         "rear_wheel_force_n_per_mm_full": rear_wheel_force_full,
         "instant_center_coords_full": instant_center_coords_full,
+        "rear_brake_caliper_point_id": brake_caliper_point_id,
     }
 
     max_travel_trim = _extract_max_travel_from_relative_series(rear_axle_relative_mm)
