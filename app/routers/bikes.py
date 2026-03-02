@@ -408,6 +408,8 @@ def _default_page_settings() -> dict:
         "show_detection_boxes": False,
         "front_wheel_size": "29",
         "rear_wheel_size": "29",
+        "brake_rotor_front_mm": 203,
+        "brake_rotor_rear_mm": 203,
     }
 
 
