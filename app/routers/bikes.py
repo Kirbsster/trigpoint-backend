@@ -1527,6 +1527,7 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "air_negative_chamber_length_mm": 20.0,
     "air_piston_head_thickness_mm": 5.0,
     "air_shaft_diameter_mm": 25.4,
+    "air_positive_shaft_diameter_mm": 8.0,
     "air_initial_pressure_psi": 175.0,
     "air_reference_temp_c": 20.0,
     "air_cold_temp_c": 5.0,
@@ -1548,6 +1549,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
             "air_shaft_diameter_mm": 25.4,
+            "air_positive_shaft_diameter_mm": 8.0,
             "air_initial_pressure_psi": 175.0,
             "air_reference_temp_c": 20.0,
             "air_cold_temp_c": 5.0,
@@ -1569,6 +1571,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
             "air_shaft_diameter_mm": 25.4,
+            "air_positive_shaft_diameter_mm": 8.0,
             "air_initial_pressure_psi": 175.0,
             "air_reference_temp_c": 20.0,
             "air_cold_temp_c": 5.0,
@@ -1590,6 +1593,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
             "air_shaft_diameter_mm": 25.4,
+            "air_positive_shaft_diameter_mm": 8.0,
             "air_initial_pressure_psi": 175.0,
             "air_reference_temp_c": 20.0,
             "air_cold_temp_c": 5.0,
@@ -1734,6 +1738,16 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
     if not math.isfinite(model["air_shaft_diameter_mm"]):
         model["air_shaft_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"]
     model["air_shaft_diameter_mm"] = max(min_shaft, min(max_shaft, model["air_shaft_diameter_mm"]))
+    if not math.isfinite(model["air_positive_shaft_diameter_mm"]):
+        model["air_positive_shaft_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"]
+    model["air_positive_shaft_diameter_mm"] = max(
+        0.0,
+        min(
+            max_shaft,
+            model["air_shaft_diameter_mm"],
+            model["air_positive_shaft_diameter_mm"],
+        ),
+    )
 
     if model["air_reference_temp_c"] <= -273.0:
         model["air_reference_temp_c"] = _DEFAULT_SHOCK_MODEL["air_reference_temp_c"]
@@ -1801,6 +1815,16 @@ def _compute_shock_force_and_rate_series(
         float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])),
     )
     d_shaft_mm = min(d_shaft_mm, max(1e-6, d_chamber_mm - 0.5))
+    d_pos_shaft_mm = max(
+        0.0,
+        float(
+            model.get(
+                "air_positive_shaft_diameter_mm",
+                _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"],
+            )
+        ),
+    )
+    d_pos_shaft_mm = min(d_pos_shaft_mm, d_shaft_mm, max(0.0, d_chamber_mm - 0.5))
     p0_psi = max(
         1e-6,
         float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])),
@@ -1815,15 +1839,22 @@ def _compute_shock_force_and_rate_series(
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
     chamber_area_m2 = math.pi * ((d_chamber_mm * 1e-3) ** 2) * 0.25
-    shaft_area_m2 = math.pi * ((d_shaft_mm * 1e-3) ** 2) * 0.25
-    effective_area_m2 = chamber_area_m2 - shaft_area_m2
-    if not math.isfinite(effective_area_m2) or effective_area_m2 <= 0:
+    neg_shaft_area_m2 = math.pi * ((d_shaft_mm * 1e-3) ** 2) * 0.25
+    pos_shaft_area_m2 = math.pi * ((d_pos_shaft_mm * 1e-3) ** 2) * 0.25
+    pos_area_m2 = chamber_area_m2 - pos_shaft_area_m2
+    neg_area_m2 = chamber_area_m2 - neg_shaft_area_m2
+    if (
+        not math.isfinite(pos_area_m2)
+        or not math.isfinite(neg_area_m2)
+        or pos_area_m2 <= 0
+        or neg_area_m2 <= 0
+    ):
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
     pos_len_eff_mm = max(1e-3, l_pos_mm - piston_t_mm)
     neg_len_eff_mm = max(1e-3, l_neg_mm - piston_t_mm)
-    v_pos0_m3 = chamber_area_m2 * (pos_len_eff_mm * 1e-3)
-    v_neg0_m3 = chamber_area_m2 * (neg_len_eff_mm * 1e-3)
+    v_pos0_m3 = pos_area_m2 * (pos_len_eff_mm * 1e-3)
+    v_neg0_m3 = neg_area_m2 * (neg_len_eff_mm * 1e-3)
     if not math.isfinite(v_pos0_m3) or not math.isfinite(v_neg0_m3) or v_pos0_m3 <= 0 or v_neg0_m3 <= 0:
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
@@ -1837,8 +1868,8 @@ def _compute_shock_force_and_rate_series(
     def _volumes_at(stroke_mm: float) -> tuple[float, float]:
         stroke_m = max(0.0, float(stroke_mm)) * 1e-3
         return (
-            v_pos0_m3 - effective_area_m2 * stroke_m,
-            v_neg0_m3 + effective_area_m2 * stroke_m,
+            v_pos0_m3 - pos_area_m2 * stroke_m,
+            v_neg0_m3 + neg_area_m2 * stroke_m,
         )
 
     def _force_at(stroke_mm: float) -> Optional[float]:
@@ -1851,7 +1882,7 @@ def _compute_shock_force_and_rate_series(
 
         if not (math.isfinite(p_pos) and math.isfinite(p_neg)):
             return None
-        force_n = (p_pos - p_neg) * effective_area_m2
+        force_n = p_pos * pos_area_m2 - p_neg * neg_area_m2
         return force_n if math.isfinite(force_n) else None
 
     parsed_strokes: list[Optional[float]] = [

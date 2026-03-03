@@ -146,6 +146,7 @@ class ShockModel(BaseModel):
     air_negative_chamber_length_mm: float = 35.0
     air_piston_head_thickness_mm: float = 5.0
     air_shaft_diameter_mm: float = 12.0
+    air_positive_shaft_diameter_mm: float = 8.0
     air_initial_pressure_psi: float = 170.0
     air_reference_temp_c: float = 20.0
     air_cold_temp_c: float = 5.0
