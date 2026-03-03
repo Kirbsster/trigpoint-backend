@@ -2008,6 +2008,34 @@ def _rotate_about_anchor(
     )
 
 
+def _map_point_by_two_anchors(
+    point_ref: tuple[float, float],
+    anchor_a_ref: tuple[float, float],
+    anchor_b_ref: tuple[float, float],
+    anchor_a_cur: tuple[float, float],
+    anchor_b_cur: tuple[float, float],
+) -> Optional[tuple[float, float]]:
+    v0x = anchor_b_ref[0] - anchor_a_ref[0]
+    v0y = anchor_b_ref[1] - anchor_a_ref[1]
+    v1x = anchor_b_cur[0] - anchor_a_cur[0]
+    v1y = anchor_b_cur[1] - anchor_a_cur[1]
+    l0 = math.hypot(v0x, v0y)
+    l1 = math.hypot(v1x, v1y)
+    if l0 <= 1e-9 or l1 <= 1e-9:
+        return None
+
+    scale = l1 / l0
+    cos_t = (v0x * v1x + v0y * v1y) / (l0 * l1)
+    sin_t = (v0x * v1y - v0y * v1x) / (l0 * l1)
+    dx = point_ref[0] - anchor_a_ref[0]
+    dy = point_ref[1] - anchor_a_ref[1]
+    x = anchor_a_cur[0] + scale * (dx * cos_t - dy * sin_t)
+    y = anchor_a_cur[1] + scale * (dx * sin_t + dy * cos_t)
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
 def _compute_anti_squat_series(
     steps: list[SolverStep],
     instant_center_solver: list[dict[str, Optional[float]]],
@@ -2160,6 +2188,7 @@ def _compute_anti_rise_series(
     steps: list[SolverStep],
     instant_center_solver: list[dict[str, Optional[float]]],
     trim_index: int,
+    rear_body_point_ids: list[str],
     rear_axle_point_id: Optional[str],
     front_axle_point_id: Optional[str],
     bb_point_id: Optional[str],
@@ -2207,12 +2236,66 @@ def _compute_anti_rise_series(
 
     series: list[Optional[float]] = []
     start_index = max(0, min(trim_index, len(steps)))
+    anchor_a_id: Optional[str] = None
+    anchor_b_id: Optional[str] = None
+    anchor_a_ref: Optional[tuple[float, float]] = None
+    anchor_b_ref: Optional[tuple[float, float]] = None
+    caliper_ref: Optional[tuple[float, float]] = None
+    if start_index < len(steps):
+        base_step = steps[start_index]
+        base_caliper = base_step.points.get(brake_caliper_point_id)
+        if base_caliper:
+            caliper_ref = (float(base_caliper[0]), float(base_caliper[1]))
+        candidate_anchor_ids = [
+            str(pid)
+            for pid in (rear_body_point_ids or [])
+            if str(pid) and str(pid) != str(brake_caliper_point_id)
+        ]
+        for i in range(len(candidate_anchor_ids) - 1):
+            if anchor_a_id:
+                break
+            for j in range(i + 1, len(candidate_anchor_ids)):
+                a_id = candidate_anchor_ids[i]
+                b_id = candidate_anchor_ids[j]
+                a_ref = base_step.points.get(a_id)
+                b_ref = base_step.points.get(b_id)
+                if not a_ref or not b_ref:
+                    continue
+                a_ref_xy = (float(a_ref[0]), float(a_ref[1]))
+                b_ref_xy = (float(b_ref[0]), float(b_ref[1]))
+                if math.hypot(b_ref_xy[0] - a_ref_xy[0], b_ref_xy[1] - a_ref_xy[1]) <= 1e-9:
+                    continue
+                anchor_a_id = a_id
+                anchor_b_id = b_id
+                anchor_a_ref = a_ref_xy
+                anchor_b_ref = b_ref_xy
+                break
+
     for idx in range(start_index, len(steps)):
         step = steps[idx]
         rear = step.points.get(rear_axle_point_id)
         front = step.points.get(front_axle_point_id)
         bb = step.points.get(bb_point_id)
         caliper = step.points.get(brake_caliper_point_id)
+        if (
+            caliper_ref is not None
+            and anchor_a_id
+            and anchor_b_id
+            and anchor_a_ref is not None
+            and anchor_b_ref is not None
+        ):
+            a_cur = step.points.get(anchor_a_id)
+            b_cur = step.points.get(anchor_b_id)
+            if a_cur and b_cur:
+                mapped = _map_point_by_two_anchors(
+                    caliper_ref,
+                    anchor_a_ref,
+                    anchor_b_ref,
+                    (float(a_cur[0]), float(a_cur[1])),
+                    (float(b_cur[0]), float(b_cur[1])),
+                )
+                if mapped is not None:
+                    caliper = mapped
         if not rear or not front or not bb or not caliper:
             series.append(None)
             continue
@@ -2230,7 +2313,11 @@ def _compute_anti_rise_series(
         rear_xy = (float(rear[0]), float(rear[1]))
         front_xy = (float(front[0]), float(front[1]))
         bb_xy = (float(bb[0]), float(bb[1]))
-        caliper_xy = (float(caliper[0]), float(caliper[1]))
+        caliper_xy = (
+            (float(caliper[0]), float(caliper[1]))
+            if isinstance(caliper, tuple)
+            else (float(caliper[0]), float(caliper[1]))
+        )
         ic_xy = (x_ic, y_ic)
 
         frame_cg = (
@@ -3074,6 +3161,7 @@ async def compute_bike_kinematics(
                 steps=source_steps,
                 instant_center_solver=instant_center_solver_full if source_steps else [],
                 trim_index=trim_index,
+                rear_body_point_ids=rear_body_point_ids,
                 rear_axle_point_id=result.rear_axle_point_id,
                 front_axle_point_id=front_axle_point_id,
                 bb_point_id=bb_point_id,
@@ -3085,6 +3173,7 @@ async def compute_bike_kinematics(
                 steps=source_steps,
                 instant_center_solver=instant_center_solver_full if source_steps else [],
                 trim_index=0,
+                rear_body_point_ids=rear_body_point_ids,
                 rear_axle_point_id=result.rear_axle_point_id,
                 front_axle_point_id=front_axle_point_id,
                 bb_point_id=bb_point_id,
