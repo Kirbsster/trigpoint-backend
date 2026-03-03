@@ -2886,28 +2886,39 @@ async def compute_bike_kinematics(
             scale_mm_per_px=scale_mm_per_px,
             settings=settings,
         )
-        anti_rise_series = _compute_anti_rise_series(
-            steps=source_steps,
-            instant_center_solver=instant_center_solver_full if source_steps else [],
-            trim_index=trim_index,
-            rear_axle_point_id=result.rear_axle_point_id,
-            front_axle_point_id=front_axle_point_id,
-            bb_point_id=bb_point_id,
-            brake_caliper_point_id=brake_caliper_point_id,
-            scale_mm_per_px=scale_mm_per_px,
-            settings=settings,
-        )
-        anti_rise_full = _compute_anti_rise_series(
-            steps=source_steps,
-            instant_center_solver=instant_center_solver_full if source_steps else [],
-            trim_index=0,
-            rear_axle_point_id=result.rear_axle_point_id,
-            front_axle_point_id=front_axle_point_id,
-            bb_point_id=bb_point_id,
-            brake_caliper_point_id=brake_caliper_point_id,
-            scale_mm_per_px=scale_mm_per_px,
-            settings=settings,
-        )
+        try:
+            anti_rise_series = _compute_anti_rise_series(
+                steps=source_steps,
+                instant_center_solver=instant_center_solver_full if source_steps else [],
+                trim_index=trim_index,
+                rear_axle_point_id=result.rear_axle_point_id,
+                front_axle_point_id=front_axle_point_id,
+                bb_point_id=bb_point_id,
+                brake_caliper_point_id=brake_caliper_point_id,
+                scale_mm_per_px=scale_mm_per_px,
+                settings=settings,
+            )
+            anti_rise_full = _compute_anti_rise_series(
+                steps=source_steps,
+                instant_center_solver=instant_center_solver_full if source_steps else [],
+                trim_index=0,
+                rear_axle_point_id=result.rear_axle_point_id,
+                front_axle_point_id=front_axle_point_id,
+                bb_point_id=bb_point_id,
+                brake_caliper_point_id=brake_caliper_point_id,
+                scale_mm_per_px=scale_mm_per_px,
+                settings=settings,
+            )
+        except Exception as exc:
+            logging.exception(
+                "anti-rise compute failed for bike %s (rear_axle=%s caliper=%s): %s",
+                bike_id,
+                result.rear_axle_point_id,
+                brake_caliper_point_id,
+                exc,
+            )
+            anti_rise_series = []
+            anti_rise_full = []
 
     for idx, s in enumerate(solver_steps):
         anti_squat_val = anti_squat_series[idx] if idx < len(anti_squat_series) else None
