@@ -410,6 +410,7 @@ def _default_page_settings() -> dict:
         "rear_wheel_size": "29",
         "brake_rotor_front_mm": 203,
         "brake_rotor_rear_mm": 203,
+        "rear_brake_ic_body_id": "",
     }
 
 
@@ -1167,29 +1168,121 @@ def _compute_scale_mm_per_px(
     return float(mm_value) / float(d_px)
 
 
-def _pick_rear_body_point_ids(
+def _list_rear_unsprung_body_candidates(
     bodies: list[RigidBody],
     rear_axle_point_id: Optional[str],
-) -> list[str]:
-    """Pick the rigid body carrying the rear axle (excluding shock/fixed bodies)."""
+) -> list[tuple[RigidBody, list[str]]]:
     if not rear_axle_point_id:
         return []
-
+    rear_axle_id = str(rear_axle_point_id)
+    candidates: list[tuple[RigidBody, list[str]]] = []
     for body in bodies or []:
         if not isinstance(body, RigidBody):
             continue
         if body.type in ("shock", "fixed"):
             continue
-        pids = [pid for pid in (body.point_ids or []) if pid]
-        if rear_axle_point_id in pids:
+        pids = [str(pid) for pid in (body.point_ids or []) if pid]
+        if rear_axle_id in pids:
+            candidates.append((body, pids))
+    return candidates
+
+
+def _pick_default_rear_unsprung_candidate_index(
+    candidates: list[tuple[RigidBody, list[str]]],
+    rear_axle_point_id: Optional[str],
+    points: list[BikePoint],
+) -> int:
+    """Default IC body heuristic for split-pivot bikes.
+
+    We prefer the upper member (usually seatstay) by taking the lowest mean `y`
+    (image coordinates: smaller y is higher on the image).
+    """
+    if not candidates:
+        return -1
+    if len(candidates) == 1:
+        return 0
+
+    rear_axle_id = str(rear_axle_point_id or "")
+    point_y_by_id: dict[str, float] = {}
+    for point in points or []:
+        pid = getattr(point, "id", None)
+        if not pid:
+            continue
+        try:
+            point_y_by_id[str(pid)] = float(getattr(point, "y"))
+        except Exception:
+            continue
+
+    rear_y = point_y_by_id.get(rear_axle_id)
+    best_idx = 0
+    best_score = (float("inf"), float("-inf"), "")
+    for idx, (body, pids) in enumerate(candidates):
+        ys = [
+            point_y_by_id[pid]
+            for pid in pids
+            if pid != rear_axle_id and pid in point_y_by_id
+        ]
+        if not ys and rear_y is not None:
+            ys = [rear_y]
+        avg_y = sum(ys) / len(ys) if ys else float("inf")
+        # tie-breaker prefers richer bodies, then stable id ordering
+        score = (avg_y, -float(len(pids)), str(getattr(body, "id", "")))
+        if score < best_score:
+            best_score = score
+            best_idx = idx
+    return best_idx
+
+
+def _pick_rear_body_point_ids(
+    bodies: list[RigidBody],
+    rear_axle_point_id: Optional[str],
+    points: list[BikePoint],
+    preferred_body_id: Optional[str] = None,
+) -> list[str]:
+    """Pick unsprung body point ids used for rear-wheel IC in anti-squat/anti-rise.
+
+    Priority:
+    1) Explicit caliper-attached body (if valid caliper point is attached)
+    2) Default split-pivot heuristic (upper/seatstay candidate)
+    """
+    candidates = _list_rear_unsprung_body_candidates(bodies, rear_axle_point_id)
+    if not candidates:
+        return []
+
+    point_type_by_id: dict[str, str] = {}
+    for point in points or []:
+        pid = getattr(point, "id", None)
+        if pid:
+            point_type_by_id[str(pid)] = str(getattr(point, "type", "") or "")
+
+    preferred_id = str(preferred_body_id or "")
+    if preferred_id:
+        for body, pids in candidates:
+            if str(getattr(body, "id", "")) == preferred_id:
+                return pids
+
+    for body, pids in candidates:
+        caliper_id = getattr(body, "brake_caliper_point_id", None)
+        if not caliper_id:
+            continue
+        if point_type_by_id.get(str(caliper_id)) == "brake_caliper":
             return pids
-    return []
+
+    idx = _pick_default_rear_unsprung_candidate_index(
+        candidates,
+        rear_axle_point_id,
+        points,
+    )
+    if idx < 0:
+        return []
+    return candidates[idx][1]
 
 
 def _pick_rear_brake_caliper_point_id(
     bodies: list[RigidBody],
     rear_axle_point_id: Optional[str],
     points: list[BikePoint],
+    preferred_body_id: Optional[str] = None,
 ) -> Optional[str]:
     """Pick brake caliper point id from the unsprung body carrying the rear axle."""
     if not rear_axle_point_id:
@@ -1202,18 +1295,47 @@ def _pick_rear_brake_caliper_point_id(
         if pid:
             point_type_by_id[str(pid)] = str(ptype or "")
 
-    candidate_bodies: list[RigidBody] = []
-    for body in bodies or []:
-        if not isinstance(body, RigidBody):
-            continue
-        if body.type in ("shock", "fixed"):
-            continue
-        pids = [str(pid) for pid in (body.point_ids or []) if pid]
-        if rear_axle_point_id in pids:
-            candidate_bodies.append(body)
+    candidate_entries = _list_rear_unsprung_body_candidates(bodies, rear_axle_point_id)
+    if not candidate_entries:
+        return None
+
+    preferred_id = str(preferred_body_id or "")
+    preferred_entry = None
+    if preferred_id:
+        for entry in candidate_entries:
+            body, _ = entry
+            if str(getattr(body, "id", "")) == preferred_id:
+                preferred_entry = entry
+                break
+
+    default_entry = None
+    if preferred_entry is None:
+        default_idx = _pick_default_rear_unsprung_candidate_index(
+            candidate_entries,
+            rear_axle_point_id,
+            points,
+        )
+        default_entry = (
+            candidate_entries[default_idx]
+            if 0 <= default_idx < len(candidate_entries)
+            else None
+        )
 
     # Primary: explicit body attachment field.
-    for body in candidate_bodies:
+    # Prefer the default selected body first, then all others.
+    ordered_entries = (
+        ([preferred_entry] if preferred_entry else [])
+        + ([default_entry] if default_entry else [])
+        + [
+            entry
+            for entry in candidate_entries
+            if entry is not preferred_entry and entry is not default_entry
+        ]
+    )
+    for entry in ordered_entries:
+        if not entry:
+            continue
+        body, _ = entry
         caliper_id = getattr(body, "brake_caliper_point_id", None)
         if not caliper_id:
             continue
@@ -1221,9 +1343,12 @@ def _pick_rear_brake_caliper_point_id(
         if point_type_by_id.get(caliper_id) == "brake_caliper":
             return caliper_id
 
-    # Fallback: first brake_caliper point inside same unsprung body point_ids.
-    for body in candidate_bodies:
-        for pid in (body.point_ids or []):
+    # Fallback: first brake_caliper point inside selected/default body, then others.
+    for entry in ordered_entries:
+        if not entry:
+            continue
+        _, pids = entry
+        for pid in pids:
             pid_s = str(pid)
             if point_type_by_id.get(pid_s) == "brake_caliper":
                 return pid_s
@@ -1234,6 +1359,39 @@ def _pick_rear_brake_caliper_point_id(
     ]
     if len(global_calipers) == 1:
         return global_calipers[0]
+
+    # If multiple global calipers exist, pick the one closest to rear axle.
+    rear_axle_point = next(
+        (
+            p
+            for p in (points or [])
+            if str(getattr(p, "id", "")) == str(rear_axle_point_id or "")
+        ),
+        None,
+    )
+    if rear_axle_point and global_calipers:
+        try:
+            rear_x = float(getattr(rear_axle_point, "x"))
+            rear_y = float(getattr(rear_axle_point, "y"))
+            best_id: Optional[str] = None
+            best_d2 = float("inf")
+            for pid in global_calipers:
+                point = next(
+                    (p for p in (points or []) if str(getattr(p, "id", "")) == str(pid)),
+                    None,
+                )
+                if point is None:
+                    continue
+                x = float(getattr(point, "x"))
+                y = float(getattr(point, "y"))
+                d2 = (x - rear_x) * (x - rear_x) + (y - rear_y) * (y - rear_y)
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_id = str(pid)
+            if best_id:
+                return best_id
+        except Exception:
+            pass
     return None
 
 
@@ -2116,10 +2274,26 @@ def _compute_anti_rise_series(
         rear_contact_lvl = _rotate_about_anchor(rear_contact, rear_contact, cos_t, sin_t)
         front_contact_lvl = _rotate_about_anchor(front_contact, rear_contact, cos_t, sin_t)
 
-        # Braking transfer line approximation:
-        # direction of caliper reaction through current rear-body instant center.
+        # Braking transfer line:
+        # reaction direction is tangent to rotor at caliper position.
+        radial_dx = caliper_lvl[0] - rear_lvl[0]
+        radial_dy = caliper_lvl[1] - rear_lvl[1]
+        radial_len = math.hypot(radial_dx, radial_dy)
+        if radial_len <= 1e-9:
+            series.append(None)
+            continue
+        tangent_dx = -radial_dy / radial_len
+        tangent_dy = radial_dx / radial_len
+        tangent_p2 = (
+            caliper_lvl[0] + tangent_dx,
+            caliper_lvl[1] + tangent_dy,
+        )
+        ifc = _intersect_infinite_lines(caliper_lvl, tangent_p2, rear_lvl, ic_lvl)
+        if ifc is None:
+            series.append(None)
+            continue
         ar_point = _intersect_line_with_vertical(
-            caliper_lvl, ic_lvl, front_contact_lvl[0]
+            rear_contact_lvl, ifc, front_contact_lvl[0]
         )
         if ar_point is None:
             series.append(None)
@@ -2639,7 +2813,12 @@ async def compute_bike_kinematics(
             coords_map.setdefault(pid, []).append(mapped)
 
     # Instant center coordinates (same coordinate space/shape as point coords lists).
-    rear_body_point_ids = _pick_rear_body_point_ids(bodies, result.rear_axle_point_id)
+    rear_body_point_ids = _pick_rear_body_point_ids(
+        bodies,
+        result.rear_axle_point_id,
+        points,
+        preferred_body_id=str(settings.get("rear_brake_ic_body_id") or ""),
+    )
     instant_center_solver = _compute_instant_center_series(solver_steps, rear_body_point_ids)
     instant_center_coords: list[dict[str, Optional[float]]] = []
     for ic in instant_center_solver:
@@ -2712,6 +2891,7 @@ async def compute_bike_kinematics(
     result.debug = {
         "perspective_mode": perspective_mode,
         "settings_found": settings_found,
+        "rear_brake_ic_body_id_setting": str(settings.get("rear_brake_ic_body_id") or ""),
         "ellipses_found": ellipses_found,
         "ellipses_keys": ellipses_keys,
         "media_doc_found": media_doc_found,
@@ -2726,6 +2906,7 @@ async def compute_bike_kinematics(
             bodies,
             result.rear_axle_point_id,
             points,
+            preferred_body_id=str(settings.get("rear_brake_ic_body_id") or ""),
         ),
     }
     rear_axle_relative_mm: list[list[float]] = []
@@ -2749,10 +2930,12 @@ async def compute_bike_kinematics(
     trim_index = 0
     front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
     bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
+    preferred_rear_brake_ic_body_id = str(settings.get("rear_brake_ic_body_id") or "")
     brake_caliper_point_id = _pick_rear_brake_caliper_point_id(
         bodies,
         result.rear_axle_point_id,
         points,
+        preferred_body_id=preferred_rear_brake_ic_body_id,
     )
     shock_type, shock_model = _normalize_shock_geometry_config(geom)
     if result.rear_axle_point_id:
