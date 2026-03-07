@@ -266,4 +266,50 @@ class BikePageSettingsOut(BikePageSettingsPayload):
     created_at: datetime
     updated_at: datetime
 
-    
+
+BikeVariantStatus = Literal["ready", "stale", "pending", "failed"]
+
+
+class BikeVariantCreate(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    sort_order: Optional[int] = None
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+    solver_policy: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BikeVariantUpdate(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    sort_order: Optional[int] = None
+    overrides: Optional[Dict[str, Any]] = None
+    solver_policy: Optional[Dict[str, Any]] = None
+    cache_fingerprint: Optional[str] = None
+    pose_cache: Optional[Dict[str, Any]] = None
+    kinematics_cache: Optional[Dict[str, Any]] = None
+    status: Optional[BikeVariantStatus] = None
+
+
+class BikeVariantOut(BaseModel):
+    id: str
+    bike_id: str
+    name: str
+    slug: str
+    is_base: bool = False
+    sort_order: int = 0
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+    solver_policy: Dict[str, Any] = Field(default_factory=dict)
+    cache_fingerprint: Optional[str] = None
+    pose_cache: Optional[Dict[str, Any]] = None
+    kinematics_cache: Optional[Dict[str, Any]] = None
+    status: BikeVariantStatus = "ready"
+    created_at: datetime
+    updated_at: datetime
+
+
+class BikeVariantHydrateOut(BaseModel):
+    variant: BikeVariantOut
+    pose_cache: Optional[Dict[str, Any]] = None
+    kinematics_cache: Optional[Dict[str, Any]] = None
+    cache_fingerprint: Optional[str] = None
+    status: BikeVariantStatus = "ready"

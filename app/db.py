@@ -44,6 +44,9 @@ def media_items_col():
 def bike_page_settings_col():
     return get_db()["bike_page_settings"]
 
+def bike_variants_col():
+    return get_db()["bike_variants"]
+
 def shock_presets_col():
     return get_db()["shock_presets"]
 
@@ -116,6 +119,23 @@ async def ensure_indexes():
         [("user_id", 1), ("bike_id", 1)],
         unique=True,
         name="uniq_user_bike_settings",
+    )
+
+    bike_variants = bike_variants_col()
+    await bike_variants.create_index(
+        [("bike_id", 1), ("sort_order", 1), ("updated_at", -1)],
+        name="idx_bike_variants_bike_sort_updated",
+    )
+    await bike_variants.create_index(
+        [("bike_id", 1), ("slug", 1)],
+        unique=True,
+        name="uniq_bike_variant_slug",
+    )
+    await bike_variants.create_index(
+        [("bike_id", 1), ("is_base", 1)],
+        unique=True,
+        name="uniq_bike_base_variant",
+        partialFilterExpression={"is_base": True},
     )
 
     shock_presets = shock_presets_col()

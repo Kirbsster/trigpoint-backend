@@ -30,13 +30,24 @@ from app.schemas import (
     BikeUpdate,
     BikePageSettingsPayload,
     BikePageSettingsOut,
+    BikeVariantCreate,
+    BikeVariantHydrateOut,
+    BikeVariantOut,
+    BikeVariantUpdate,
     ShockPresetOut,
     ShockModel,
 )
 from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult, SolverStep
 from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
-from app.db import bikes_col, media_items_col, bike_page_settings_col, shock_presets_col, users_col
+from app.db import (
+    bike_page_settings_col,
+    bike_variants_col,
+    bikes_col,
+    media_items_col,
+    shock_presets_col,
+    users_col,
+)
 from app.storage import delete_media_prefix, GCS_BUCKET_NAME
 # from app.storage import generate_signed_url
 from .auth import get_current_user
@@ -414,6 +425,86 @@ def _default_page_settings() -> dict:
     }
 
 
+def _slugify_variant_name(value: Optional[str]) -> str:
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
+    return cleaned[:64] if cleaned else "variant"
+
+
+def _variant_doc_to_out(doc: dict) -> BikeVariantOut:
+    return BikeVariantOut(
+        id=str(doc["_id"]),
+        bike_id=str(doc["bike_id"]),
+        name=str(doc.get("name") or "Variant"),
+        slug=str(doc.get("slug") or "variant"),
+        is_base=bool(doc.get("is_base", False)),
+        sort_order=int(doc.get("sort_order", 0) or 0),
+        overrides=doc.get("overrides") or {},
+        solver_policy=doc.get("solver_policy") or {},
+        cache_fingerprint=doc.get("cache_fingerprint"),
+        pose_cache=doc.get("pose_cache"),
+        kinematics_cache=doc.get("kinematics_cache"),
+        status=str(doc.get("status") or "ready"),
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"],
+    )
+
+
+async def _load_bike_or_404(bike_id: str) -> dict:
+    try:
+        bike_oid = ObjectId(bike_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid bike_id")
+    bike_doc = await bikes_col().find_one({"_id": bike_oid})
+    if not bike_doc:
+        raise HTTPException(status_code=404, detail="Bike not found")
+    return bike_doc
+
+
+async def _load_variant_or_404(variant_id: str) -> dict:
+    try:
+        variant_oid = ObjectId(variant_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid variant_id")
+    variant_doc = await bike_variants_col().find_one({"_id": variant_oid})
+    if not variant_doc:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    return variant_doc
+
+
+async def _ensure_base_variant_for_bike(bike_doc: dict) -> dict:
+    variants = bike_variants_col()
+    existing = await variants.find_one({"bike_id": bike_doc["_id"], "is_base": True})
+    if existing:
+        return existing
+
+    now = datetime.utcnow()
+    base_doc = {
+        "bike_id": bike_doc["_id"],
+        "name": "Base",
+        "slug": "base",
+        "is_base": True,
+        "sort_order": 0,
+        "overrides": {},
+        "solver_policy": {},
+        "cache_fingerprint": None,
+        "pose_cache": None,
+        "kinematics_cache": None,
+        "status": "ready",
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        result = await variants.insert_one(base_doc)
+        base_doc["_id"] = result.inserted_id
+        return base_doc
+    except DuplicateKeyError:
+        existing = await variants.find_one({"bike_id": bike_doc["_id"], "is_base": True})
+        if existing:
+            return existing
+        raise
+
+
 def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
     return BikePageSettingsOut(
         bike_id=str(doc["bike_id"]),
@@ -456,7 +547,179 @@ async def create_bike(
     bikes = bikes_col()
     result = await bikes.insert_one(doc)
     doc["_id"] = result.inserted_id
+    await _ensure_base_variant_for_bike(doc)
     return bike_doc_to_out(doc, can_edit=True)
+
+
+@router.get("/{bike_id}/variants", response_model=List[BikeVariantOut])
+async def list_bike_variants(
+    bike_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    bike_doc = await _load_bike_or_404(bike_id)
+    if not _can_view_bike(bike_doc, user_oid, is_admin):
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    await _ensure_base_variant_for_bike(bike_doc)
+    docs = await bike_variants_col().find({"bike_id": bike_doc["_id"]}).sort(
+        [("sort_order", 1), ("created_at", 1)]
+    ).to_list(length=200)
+    return [_variant_doc_to_out(doc) for doc in docs]
+
+
+@router.post("/{bike_id}/variants", response_model=BikeVariantOut, status_code=status.HTTP_201_CREATED)
+async def create_bike_variant(
+    bike_id: str,
+    payload: BikeVariantCreate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    bike_doc = await _load_bike_or_404(bike_id)
+    if not (is_admin or _is_bike_owner(bike_doc, user_oid)):
+        raise HTTPException(status_code=404, detail="Bike not found")
+
+    await _ensure_base_variant_for_bike(bike_doc)
+    now = datetime.utcnow()
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Variant name is required")
+    slug = _slugify_variant_name(payload.slug or name)
+    sort_order = payload.sort_order
+    if sort_order is None:
+        last_variant = await bike_variants_col().find({"bike_id": bike_doc["_id"]}).sort(
+            [("sort_order", -1), ("created_at", -1)]
+        ).limit(1).to_list(length=1)
+        sort_order = int(last_variant[0].get("sort_order", 0) or 0) + 1 if last_variant else 1
+
+    variant_doc = {
+        "bike_id": bike_doc["_id"],
+        "name": name,
+        "slug": slug,
+        "is_base": False,
+        "sort_order": int(sort_order),
+        "overrides": payload.overrides or {},
+        "solver_policy": payload.solver_policy or {},
+        "cache_fingerprint": None,
+        "pose_cache": None,
+        "kinematics_cache": None,
+        "status": "ready",
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        result = await bike_variants_col().insert_one(variant_doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Variant slug already exists for this bike")
+    variant_doc["_id"] = result.inserted_id
+    return _variant_doc_to_out(variant_doc)
+
+
+@router.get("/variants/{variant_id}", response_model=BikeVariantOut)
+async def get_bike_variant(
+    variant_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    variant_doc = await _load_variant_or_404(variant_id)
+    bike_doc = await bikes_col().find_one({"_id": variant_doc["bike_id"]})
+    if not bike_doc or not _can_view_bike(bike_doc, user_oid, is_admin):
+        raise HTTPException(status_code=404, detail="Variant not found")
+    return _variant_doc_to_out(variant_doc)
+
+
+@router.put("/variants/{variant_id}", response_model=BikeVariantOut)
+async def update_bike_variant(
+    variant_id: str,
+    payload: BikeVariantUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    variant_doc = await _load_variant_or_404(variant_id)
+    bike_doc = await bikes_col().find_one({"_id": variant_doc["bike_id"]})
+    if not bike_doc or not (is_admin or _is_bike_owner(bike_doc, user_oid)):
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    update_doc: dict = {}
+    if payload.name is not None:
+        if variant_doc.get("is_base"):
+            raise HTTPException(status_code=400, detail="Base variant name cannot be changed")
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Variant name is required")
+        update_doc["name"] = name
+    if payload.slug is not None:
+        if variant_doc.get("is_base"):
+            raise HTTPException(status_code=400, detail="Base variant slug cannot be changed")
+        update_doc["slug"] = _slugify_variant_name(payload.slug)
+    if payload.sort_order is not None:
+        update_doc["sort_order"] = int(payload.sort_order)
+    if payload.overrides is not None:
+        update_doc["overrides"] = payload.overrides
+    if payload.solver_policy is not None:
+        update_doc["solver_policy"] = payload.solver_policy
+    if payload.cache_fingerprint is not None:
+        update_doc["cache_fingerprint"] = payload.cache_fingerprint
+    if payload.pose_cache is not None:
+        update_doc["pose_cache"] = payload.pose_cache
+    if payload.kinematics_cache is not None:
+        update_doc["kinematics_cache"] = payload.kinematics_cache
+    if payload.status is not None:
+        update_doc["status"] = payload.status
+
+    if not update_doc:
+        return _variant_doc_to_out(variant_doc)
+
+    update_doc["updated_at"] = datetime.utcnow()
+    try:
+        await bike_variants_col().update_one({"_id": variant_doc["_id"]}, {"$set": update_doc})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Variant slug already exists for this bike")
+    merged = {**variant_doc, **update_doc}
+    return _variant_doc_to_out(merged)
+
+
+@router.delete("/variants/{variant_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_bike_variant(
+    variant_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    variant_doc = await _load_variant_or_404(variant_id)
+    bike_doc = await bikes_col().find_one({"_id": variant_doc["bike_id"]})
+    if not bike_doc or not (is_admin or _is_bike_owner(bike_doc, user_oid)):
+        raise HTTPException(status_code=404, detail="Variant not found")
+    if bool(variant_doc.get("is_base")):
+        raise HTTPException(status_code=400, detail="Base variant cannot be deleted")
+
+    await bike_variants_col().delete_one({"_id": variant_doc["_id"]})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/variants/{variant_id}/hydrate", response_model=BikeVariantHydrateOut)
+async def hydrate_bike_variant(
+    variant_id: str,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+    variant_doc = await _load_variant_or_404(variant_id)
+    bike_doc = await bikes_col().find_one({"_id": variant_doc["bike_id"]})
+    if not bike_doc or not _can_view_bike(bike_doc, user_oid, is_admin):
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    return BikeVariantHydrateOut(
+        variant=_variant_doc_to_out(variant_doc),
+        pose_cache=variant_doc.get("pose_cache"),
+        kinematics_cache=variant_doc.get("kinematics_cache"),
+        cache_fingerprint=variant_doc.get("cache_fingerprint"),
+        status=str(variant_doc.get("status") or "ready"),
+    )
 
 
 @router.get("", response_model=List[BikeOut])
@@ -3293,6 +3556,7 @@ async def delete_bike(
 
     bikes = bikes_col()
     media_items = media_items_col()
+    variants = bike_variants_col()
 
     doc = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
     if not doc:
@@ -3319,4 +3583,5 @@ async def delete_bike(
             )
 
     await bikes.delete_one({"_id": oid, **_owner_filter(user_oid)})
+    await variants.delete_many({"bike_id": oid})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
