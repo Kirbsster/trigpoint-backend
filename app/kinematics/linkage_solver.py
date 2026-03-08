@@ -547,8 +547,55 @@ def solve_bike_rest_pose(
         include_fixed_body_rigid_groups=True,
     )
 
-    axis_constraints: Dict[int, Dict[str, float]] = {}
+    # In rest-pose solving the frame reference points must move as a single
+    # rigid carrier. Otherwise the BB/fixed points can satisfy axis
+    # constraints independently and "shear" relative to one another.
     point_index_by_id = {p.id: idx for idx, p in enumerate(points)}
+    frame_anchor_ids: set[str] = {
+        str(p.id)
+        for p in points
+        if str(getattr(p, "type", "") or "").strip().lower() in {"fixed", "bb"}
+    }
+    for body in bodies or []:
+        if str(getattr(body, "type", "") or "").strip().lower() != "fixed":
+            continue
+        for pid in getattr(body, "point_ids", None) or []:
+            if pid:
+                frame_anchor_ids.add(str(pid))
+
+    frame_anchor_indices = [
+        idx for pid, idx in point_index_by_id.items() if pid in frame_anchor_ids
+    ]
+    if len(frame_anchor_indices) >= 2:
+        existing_pairs = {
+            tuple(sorted((edge.ia, edge.ib)))
+            for edge in edges
+        }
+        for i in range(len(frame_anchor_indices) - 1):
+            ia = frame_anchor_indices[i]
+            for j in range(i + 1, len(frame_anchor_indices)):
+                ib = frame_anchor_indices[j]
+                pair = tuple(sorted((ia, ib)))
+                if pair in existing_pairs:
+                    continue
+                dx = points[ib].x - points[ia].x
+                dy = points[ib].y - points[ia].y
+                edges.append(LinkEdge(ia=ia, ib=ib, L0=math.hypot(dx, dy), is_shock=False))
+                existing_pairs.add(pair)
+    if len(frame_anchor_indices) >= 3:
+        rest = [(points[i].x, points[i].y) for i in frame_anchor_indices]
+        cx = sum(p[0] for p in rest) / len(rest)
+        cy = sum(p[1] for p in rest) / len(rest)
+        rigid_groups.append(
+            {
+                "indices": frame_anchor_indices,
+                "rest": rest,
+                "rest_cx": cx,
+                "rest_cy": cy,
+            }
+        )
+
+    axis_constraints: Dict[int, Dict[str, float]] = {}
     for point_id, constraint in (point_constraints or {}).items():
         idx = point_index_by_id.get(str(point_id))
         if idx is None:
