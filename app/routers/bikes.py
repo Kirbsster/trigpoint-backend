@@ -2111,6 +2111,28 @@ def _compute_variant_rest_pose(
     return solved_points, debug
 
 
+def _shock_length_mm_for_points(
+    points: List[BikePoint],
+    bodies: List[RigidBody],
+    scale_mm_per_px: float,
+) -> Optional[float]:
+    if not (scale_mm_per_px > 0):
+        return None
+    point_by_id = {str(point.id): point for point in points}
+    for body in bodies:
+        if body.type != "shock":
+            continue
+        point_ids = [str(pid) for pid in (body.point_ids or []) if pid]
+        if len(point_ids) < 2:
+            continue
+        a = point_by_id.get(point_ids[0])
+        b = point_by_id.get(point_ids[1])
+        if a is None or b is None:
+            continue
+        return math.hypot(float(b.x) - float(a.x), float(b.y) - float(a.y)) * scale_mm_per_px
+    return None
+
+
 def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
     if not teeth or teeth <= 0:
         return None
@@ -3249,6 +3271,25 @@ async def compute_bike_kinematics(
             s.rear_travel = s.rear_travel * scale_mm
     if full_steps:
         result.full_steps = full_steps
+
+    if variant_doc is not None and pose_debug.get("applied") and solver_steps:
+        solved_zero_points = {point.id: (float(point.x), float(point.y)) for point in points}
+        shock_length_zero_mm = _shock_length_mm_for_points(points, bodies_for_solver, scale_mm_per_px)
+        solver_steps[0].points = solved_zero_points
+        solver_steps[0].shock_stroke = 0.0
+        solver_steps[0].rear_travel = 0.0
+        solver_steps[0].leverage_ratio = None
+        if shock_length_zero_mm is not None:
+            solver_steps[0].shock_length = shock_length_zero_mm
+        if full_steps:
+            zero_index = next((idx for idx, step in enumerate(full_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9), None)
+            if zero_index is not None:
+                full_steps[zero_index].points = solved_zero_points
+                full_steps[zero_index].shock_stroke = 0.0
+                full_steps[zero_index].rear_travel = 0.0
+                full_steps[zero_index].leverage_ratio = None
+                if shock_length_zero_mm is not None:
+                    full_steps[zero_index].shock_length = shock_length_zero_mm
 
     rectify_scale = None
     if isinstance(rectify, dict) and rectify.get("scale") is not None:
