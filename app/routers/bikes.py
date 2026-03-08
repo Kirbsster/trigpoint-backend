@@ -750,8 +750,16 @@ async def update_bike_variant(
         update_doc["sort_order"] = int(payload.sort_order)
     if payload.overrides is not None:
         update_doc["overrides"] = payload.overrides
+        update_doc["pose_cache"] = None
+        update_doc["kinematics_cache"] = None
+        update_doc["cache_fingerprint"] = None
+        update_doc["status"] = "stale"
     if payload.solver_policy is not None:
         update_doc["solver_policy"] = payload.solver_policy
+        update_doc["pose_cache"] = None
+        update_doc["kinematics_cache"] = None
+        update_doc["cache_fingerprint"] = None
+        update_doc["status"] = "stale"
     if payload.cache_fingerprint is not None:
         update_doc["cache_fingerprint"] = payload.cache_fingerprint
     if payload.pose_cache is not None:
