@@ -2,6 +2,8 @@
 import math
 import os
 import re
+import json
+import hashlib
 from datetime import datetime
 from typing import Optional, List
 import logging
@@ -37,7 +39,12 @@ from app.schemas import (
     ShockPresetOut,
     ShockModel,
 )
-from app.kinematics.linkage_solver import solve_bike_linkage, SolverResult, SolverStep
+from app.kinematics.linkage_solver import (
+    solve_bike_linkage,
+    solve_bike_rest_pose,
+    SolverResult,
+    SolverStep,
+)
 from app.kinematics.homography import compute_homography_from_ellipses, apply_homography
 
 from app.db import (
@@ -503,6 +510,89 @@ async def _ensure_base_variant_for_bike(bike_doc: dict) -> dict:
         if existing:
             return existing
         raise
+
+
+def _merge_variant_overrides_into_settings(
+    base_settings: Optional[dict],
+    overrides: Optional[dict],
+) -> dict:
+    merged = dict(base_settings or {})
+    for key, value in (overrides or {}).items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _apply_variant_overrides_to_geometry(
+    geometry: Optional[dict],
+    overrides: Optional[dict],
+) -> dict:
+    geom = dict(geometry or {})
+    if not isinstance(overrides, dict):
+        return geom
+
+    if overrides.get("shock_type") is not None:
+        geom["shock_type"] = overrides.get("shock_type")
+    if overrides.get("shock_model") is not None:
+        geom["shock_model"] = overrides.get("shock_model")
+    if overrides.get("shock_eye_mm") is not None:
+        geom["shock_eye_mm"] = overrides.get("shock_eye_mm")
+    return geom
+
+
+def _apply_variant_overrides_to_bodies(
+    bodies: List[RigidBody],
+    overrides: Optional[dict],
+    scale_mm_per_px: float,
+) -> List[RigidBody]:
+    if not bodies:
+        return []
+    if not isinstance(overrides, dict):
+        return [body.copy(deep=True) for body in bodies]
+
+    shock_eye_mm = _parse_optional_finite(overrides.get("shock_eye_mm"))
+    shock_stroke_mm = _parse_optional_finite(overrides.get("shock_stroke_mm"))
+
+    out: List[RigidBody] = []
+    for body in bodies:
+        if body.type != "shock":
+            out.append(body.copy(deep=True))
+            continue
+
+        update: dict = {}
+        if shock_eye_mm is not None and scale_mm_per_px > 0:
+            update["length0"] = shock_eye_mm / scale_mm_per_px
+        if shock_stroke_mm is not None:
+            update["stroke"] = shock_stroke_mm
+        out.append(body.copy(update=update) if update else body.copy(deep=True))
+    return out
+
+
+def _variant_fingerprint(
+    bike_doc: dict,
+    variant_doc: dict,
+    overrides: Optional[dict],
+    settings: Optional[dict],
+    *,
+    steps: int,
+    iterations: int,
+    solver_version: str = "variant_pose_v1",
+) -> str:
+    payload = {
+        "bike_id": str(bike_doc.get("_id") or ""),
+        "bike_updated_at": bike_doc.get("updated_at").isoformat() if bike_doc.get("updated_at") else None,
+        "variant_id": str(variant_doc.get("_id") or ""),
+        "variant_updated_at": variant_doc.get("updated_at").isoformat() if variant_doc.get("updated_at") else None,
+        "overrides": overrides or {},
+        "settings": settings or {},
+        "steps": int(steps),
+        "iterations": int(iterations),
+        "solver_version": solver_version,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()
 
 
 def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
@@ -1957,6 +2047,70 @@ def _get_wheel_outer_radius_mm(size_id: Optional[str]) -> Optional[float]:
     return bsd * 0.5 + _TYRE_THICKNESS_MM
 
 
+def _variant_requires_rest_pose(
+    base_settings: dict,
+    effective_settings: dict,
+) -> bool:
+    return (
+        str(base_settings.get("front_wheel_size", "29")) != str(effective_settings.get("front_wheel_size", "29"))
+        or str(base_settings.get("rear_wheel_size", "29")) != str(effective_settings.get("rear_wheel_size", "29"))
+    )
+
+
+def _compute_variant_rest_pose(
+    *,
+    points: List[BikePoint],
+    bodies: List[RigidBody],
+    scale_mm_per_px: float,
+    base_settings: dict,
+    effective_settings: dict,
+    iterations: int,
+) -> tuple[List[BikePoint], dict]:
+    if not (scale_mm_per_px > 0):
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
+
+    bb_point = next((p for p in points if p.type in ("bb", "bottom_bracket")), None)
+    rear_axle_point = next((p for p in points if p.type == "rear_axle"), None)
+    front_axle_point = next((p for p in points if p.type == "front_axle"), None)
+    if not bb_point or not rear_axle_point or not front_axle_point:
+        return points, {"mode": "rest_pose", "applied": False, "reason": "missing_anchor_points"}
+
+    base_rear_radius_mm = _get_wheel_outer_radius_mm(base_settings.get("rear_wheel_size", "29"))
+    base_front_radius_mm = _get_wheel_outer_radius_mm(base_settings.get("front_wheel_size", "29"))
+    new_rear_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("rear_wheel_size", "29"))
+    new_front_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("front_wheel_size", "29"))
+    if not base_rear_radius_mm or not base_front_radius_mm or not new_rear_radius_mm or not new_front_radius_mm:
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_wheel_sizes"}
+
+    base_rear_radius_px = base_rear_radius_mm / scale_mm_per_px
+    base_front_radius_px = base_front_radius_mm / scale_mm_per_px
+    new_rear_radius_px = new_rear_radius_mm / scale_mm_per_px
+    new_front_radius_px = new_front_radius_mm / scale_mm_per_px
+
+    rear_contact_y = float(rear_axle_point.y) + base_rear_radius_px
+    front_contact_y = float(front_axle_point.y) + base_front_radius_px
+
+    point_constraints = {
+        str(bb_point.id): {"x": float(bb_point.x)},
+        str(rear_axle_point.id): {"y": rear_contact_y - new_rear_radius_px},
+        str(front_axle_point.id): {"y": front_contact_y - new_front_radius_px},
+    }
+    solved_points, debug = solve_bike_rest_pose(
+        points,
+        bodies,
+        point_constraints=point_constraints,
+        iterations=max(200, iterations * 3),
+    )
+    debug.update(
+        {
+            "applied": True,
+            "base_front_contact_y": front_contact_y,
+            "base_rear_contact_y": rear_contact_y,
+        }
+    )
+    return solved_points, debug
+
+
 def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
     if not teeth or teeth <= 0:
         return None
@@ -2838,6 +2992,7 @@ async def compute_bike_kinematics(
     bike_id: str,
     steps: int = 250,
     iterations: int = 250,
+    variant_id: Optional[str] = None,
     current_user=Depends(get_current_user),
 ):
     """
@@ -2866,6 +3021,19 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=403, detail="Not allowed to view this bike")
     is_owner = _is_bike_owner(doc, user_oid)
 
+    variant_doc: Optional[dict] = None
+    variant_overrides: dict = {}
+    variant_fingerprint: Optional[str] = None
+    if variant_id:
+        variant_doc = await _load_variant_or_404(variant_id)
+        if str(variant_doc.get("bike_id")) != str(oid):
+            raise HTTPException(status_code=404, detail="Variant not found")
+        variant_overrides = (
+            dict(variant_doc.get("overrides") or {})
+            if isinstance(variant_doc.get("overrides"), dict)
+            else {}
+        )
+
     # ---- Extract / validate points ----
     raw_points = doc.get("points") or []
     points: List[BikePoint] = []
@@ -2881,9 +3049,10 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
 
     settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
-    settings = settings_doc.get("settings") if settings_doc else {}
-    if not isinstance(settings, dict):
-        settings = {}
+    base_settings = settings_doc.get("settings") if settings_doc else {}
+    if not isinstance(base_settings, dict):
+        base_settings = {}
+    settings = _merge_variant_overrides_into_settings(base_settings, variant_overrides)
     perspective_mode = settings.get("perspective_mode", "off")
     settings_found = settings_doc is not None
 
@@ -2965,7 +3134,7 @@ async def compute_bike_kinematics(
         raise HTTPException(status_code=400, detail="Bike has no rigid bodies defined")
 
     # ---- Get scale_mm_per_px from geometry (needed to convert stroke mm → px) ----
-    geom = doc.get("geometry") or {}
+    geom = _apply_variant_overrides_to_geometry(doc.get("geometry") or {}, variant_overrides)
     raw_scale = geom.get("scale_mm_per_px")
     if raw_scale is None:
         raise HTTPException(
@@ -3003,22 +3172,48 @@ async def compute_bike_kinematics(
         )
 
     # ---- Convert shock stroke from mm → px for the solver ----
-    bodies_for_solver: List[RigidBody] = []
-    for b in bodies:
+    bodies_for_solver = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
+
+    if variant_doc is not None:
+        variant_fingerprint = _variant_fingerprint(
+            doc,
+            variant_doc,
+            variant_overrides,
+            settings,
+            steps=steps,
+            iterations=iterations,
+        )
+        if _variant_requires_rest_pose(base_settings, settings):
+            solved_points, pose_debug = _compute_variant_rest_pose(
+                points=points,
+                bodies=bodies_for_solver,
+                scale_mm_per_px=scale_mm_per_px,
+                base_settings=base_settings,
+                effective_settings=settings,
+                iterations=iterations,
+            )
+            points = solved_points
+        else:
+            pose_debug = {"mode": "rest_pose", "applied": False, "reason": "no_pose_override"}
+    else:
+        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
+
+    # ---- Convert shock stroke from mm → px for the solver ----
+    bodies_for_solver_px: List[RigidBody] = []
+    for b in bodies_for_solver:
         if b.type == "shock" and b.stroke is not None:
             stroke_mm = float(b.stroke)
             stroke_px = stroke_mm / scale_mm_per_px
-            # clone body with stroke in px
             b_px = b.copy(update={"stroke": stroke_px})
-            bodies_for_solver.append(b_px)
+            bodies_for_solver_px.append(b_px)
         else:
-            bodies_for_solver.append(b)
+            bodies_for_solver_px.append(b)
 
     # ---- Run solver (all geometry in px) ----
     try:
         result = solve_bike_linkage(
             points=points,
-            bodies=bodies_for_solver,  # NOTE: stroke now in px
+            bodies=bodies_for_solver_px,  # NOTE: stroke now in px
             n_steps=steps,
             iterations=iterations,
             pre_steps=5,
@@ -3155,6 +3350,10 @@ async def compute_bike_kinematics(
     result.debug = {
         "perspective_mode": perspective_mode,
         "settings_found": settings_found,
+        "variant_id": str(variant_doc["_id"]) if variant_doc else None,
+        "variant_is_base": bool(variant_doc.get("is_base")) if variant_doc else False,
+        "variant_fingerprint": variant_fingerprint,
+        "pose_debug": pose_debug,
         "rear_brake_ic_body_id_setting": str(settings.get("rear_brake_ic_body_id") or ""),
         "ellipses_found": ellipses_found,
         "ellipses_keys": ellipses_keys,
@@ -3440,7 +3639,7 @@ async def compute_bike_kinematics(
     # --------------------------------------------------------
     # 4) Persist into Mongo
     # --------------------------------------------------------
-    if is_owner:
+    if is_owner and variant_doc is None:
         await bikes.update_one(
             {"_id": oid, **_owner_filter(user_oid)},
             {
@@ -3448,6 +3647,26 @@ async def compute_bike_kinematics(
                     "points": new_points,
                     "kinematics": kin_doc,
                     "max_rear_travel_mm": max_rear_travel_mm,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+    elif is_owner and variant_doc is not None:
+        pose_cache = {
+            "point_coords": {
+                point.id: {"x": float(point.x), "y": float(point.y)}
+                for point in points
+            },
+            "debug": pose_debug,
+        }
+        await bike_variants_col().update_one(
+            {"_id": variant_doc["_id"], "bike_id": oid},
+            {
+                "$set": {
+                    "pose_cache": pose_cache,
+                    "kinematics_cache": kin_doc,
+                    "cache_fingerprint": variant_fingerprint,
+                    "status": "ready",
                     "updated_at": datetime.utcnow(),
                 }
             },

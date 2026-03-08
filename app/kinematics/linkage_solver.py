@@ -60,6 +60,9 @@ class SolverResult(BaseModel):
 def _build_internal_model(
     points: List[BikePoint],
     bodies: List[RigidBody],
+    *,
+    lock_point_types: bool = True,
+    include_fixed_body_rigid_groups: bool = False,
 ) -> tuple[
     List[LinkEdge],
     List[bool],         # fixed flags per point index
@@ -92,8 +95,8 @@ def _build_internal_model(
     x0 = [p.x for p in points]
     y0 = [p.y for p in points]
 
-    # Fixed points: type == "fixed" or "bb"
-    fixed = [p.type in ("fixed", "bb") for p in points]
+    # Fixed points: type == "fixed" or "bb" in the standard solver path.
+    fixed = [lock_point_types and p.type in ("fixed", "bb") for p in points]
 
     # Rear axle index (optional)
     rear_axle_idx = next(
@@ -154,7 +157,7 @@ def _build_internal_model(
             continue
 
         # Fixed body: lock all its points
-        if body.type == "fixed":
+        if body.type == "fixed" and lock_point_types:
             for pid in pids:
                 if pid not in idx:
                     raise ValueError(f"RigidBody {body.id!r} references unknown point {pid!r}.")
@@ -210,7 +213,7 @@ def _build_internal_model(
             edges.append(LinkEdge(ia=ia, ib=ib, L0=L0_geom, is_shock=False))
 
         # Rigid body shape matching (>=3 points, non-shock, non-fixed)
-        if body.type != "fixed":
+        if body.type != "fixed" or include_fixed_body_rigid_groups:
             group_indices = [idx[pid] for pid in pids if pid in idx]
             if len(group_indices) >= 3:
                 rest = [(x0[i], y0[i]) for i in group_indices]
@@ -260,6 +263,7 @@ def _solve_with_edges(
     n_steps: int,
     iterations: int,
     pre_steps: int = 0,
+    axis_constraints: Optional[Dict[int, Dict[str, float]]] = None,
 ) -> SolverResult:
     """
     Position-based distance-constraint solver for the linkage.
@@ -269,6 +273,19 @@ def _solve_with_edges(
     n = len(points)
     x = [p.x for p in points]
     y = [p.y for p in points]
+
+    def _apply_axis_constraints() -> None:
+        if not axis_constraints:
+            return
+        for idx, constraint in axis_constraints.items():
+            if idx < 0 or idx >= len(x):
+                continue
+            target_x = constraint.get("x")
+            target_y = constraint.get("y")
+            if target_x is not None:
+                x[idx] = float(target_x)
+            if target_y is not None:
+                y[idx] = float(target_y)
 
     # Rear axle initial vertical position
     rear_y0 = y[rear_axle_idx] if rear_axle_idx is not None else None
@@ -283,6 +300,8 @@ def _solve_with_edges(
     if pre_steps > 0:
         step_stroke = driver_stroke / n_steps
         pre_roll_len = step_stroke * pre_steps
+
+    _apply_axis_constraints()
 
     for step_i in range(total_steps + 1):
         # Shock stroke used at this step (negative → extension, if pre_steps > 0)
@@ -371,6 +390,8 @@ def _solve_with_edges(
                     x[i] = cur_cx + tx
                     y[i] = cur_cy + ty
 
+            _apply_axis_constraints()
+
         # --- Record this step ---
         # Rear axle travel (vertical, positive "up" from initial)
         rear_travel: Optional[float] = None
@@ -436,6 +457,15 @@ def _solve_with_edges(
         "driver_L0": driver_L0,
         "driver_stroke": driver_stroke,
         "pre_steps": pre_steps,
+        "axis_constraints": {
+            points[idx].id: {
+                key: float(value)
+                for key, value in constraint.items()
+                if key in {"x", "y"} and value is not None
+            }
+            for idx, constraint in (axis_constraints or {}).items()
+            if 0 <= idx < len(points)
+        },
     }
 
     return SolverResult(
@@ -488,3 +518,80 @@ def solve_bike_linkage(
         iterations=iterations,
         pre_steps=pre_steps,
     )
+
+
+def solve_bike_rest_pose(
+    points: List[BikePoint],
+    bodies: List[RigidBody],
+    *,
+    point_constraints: Dict[str, Dict[str, float]],
+    iterations: int = 800,
+) -> tuple[List[BikePoint], Dict[str, object]]:
+    (
+        edges,
+        fixed,
+        _rear_axle_idx,
+        driver_edge_idx,
+        driver_L0,
+        _driver_stroke,
+        rigid_groups,
+    ) = _build_internal_model(
+        points,
+        bodies,
+        lock_point_types=False,
+        include_fixed_body_rigid_groups=True,
+    )
+
+    axis_constraints: Dict[int, Dict[str, float]] = {}
+    point_index_by_id = {p.id: idx for idx, p in enumerate(points)}
+    for point_id, constraint in (point_constraints or {}).items():
+        idx = point_index_by_id.get(str(point_id))
+        if idx is None:
+            continue
+        axis_constraints[idx] = {
+            key: float(value)
+            for key, value in constraint.items()
+            if key in {"x", "y"} and value is not None
+        }
+
+    result = _solve_with_edges(
+        points=points,
+        edges=edges,
+        fixed=fixed,
+        rear_axle_idx=None,
+        driver_edge_idx=driver_edge_idx,
+        driver_L0=driver_L0,
+        driver_stroke=0.0,
+        rigid_groups=rigid_groups,
+        n_steps=1,
+        iterations=max(1, iterations),
+        pre_steps=0,
+        axis_constraints=axis_constraints,
+    )
+
+    solved_positions = result.steps[-1].points if result.steps else {}
+    solved_points: List[BikePoint] = []
+    max_constraint_error = 0.0
+    for point in points:
+        coords = solved_positions.get(point.id)
+        if coords is None:
+            solved_points.append(point)
+            continue
+        x_val = float(coords[0])
+        y_val = float(coords[1])
+        constraint = point_constraints.get(point.id) or {}
+        if constraint.get("x") is not None:
+            max_constraint_error = max(max_constraint_error, abs(x_val - float(constraint["x"])))
+        if constraint.get("y") is not None:
+            max_constraint_error = max(max_constraint_error, abs(y_val - float(constraint["y"])))
+        solved_points.append(point.copy(update={"x": x_val, "y": y_val}))
+
+    debug = dict(result.debug or {})
+    debug.update(
+        {
+            "mode": "rest_pose",
+            "point_constraints": point_constraints,
+            "max_constraint_error_px": max_constraint_error,
+        }
+    )
+    return solved_points, debug
