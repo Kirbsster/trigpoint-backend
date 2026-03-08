@@ -3210,13 +3210,17 @@ async def compute_bike_kinematics(
             bodies_for_solver_px.append(b)
 
     # ---- Run solver (all geometry in px) ----
+    pre_steps = 5
+    if variant_doc is not None and pose_debug.get("applied"):
+        pre_steps = 0
+
     try:
         result = solve_bike_linkage(
             points=points,
             bodies=bodies_for_solver_px,  # NOTE: stroke now in px
             n_steps=steps,
             iterations=iterations,
-            pre_steps=5,
+            pre_steps=pre_steps,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
