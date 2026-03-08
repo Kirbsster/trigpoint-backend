@@ -1,0 +1,16 @@
+substitutions:
+  _IMAGE: gcr.io/trigpoint-testing/trigpoint-backend
+  _INSTALL_YOLO: "true"
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - INSTALL_YOLO=${_INSTALL_YOLO}
+      - -t
+      - ${_IMAGE}
+      - .
+
+images:
+  - ${_IMAGE}

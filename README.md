@@ -150,6 +150,23 @@ source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
+Optional YOLO/image-detection dependencies can be installed separately:
+
+pip install -r requirements-yolo.txt
+
+Docker builds install YOLO by default. For faster dev builds that skip it:
+
+docker build --build-arg INSTALL_YOLO=false -t trigpoint-backend-dev .
+
+Cloud Build using `gcloud builds submit --tag ...` does not expose Docker build args directly.
+Use the build config instead:
+
+gcloud builds submit --config cloudbuild.yaml
+
+To skip YOLO in a dev build:
+
+gcloud builds submit --config cloudbuild.yaml --substitutions=_INSTALL_YOLO=false
+
 Environment variables typically control:
 - MongoDB connection
 - Auth configuration

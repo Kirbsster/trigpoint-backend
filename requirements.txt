@@ -8,6 +8,4 @@ python-jose[cryptography]>=3.3
 google-cloud-storage
 python-multipart
 Pillow
-ultralytics
 numpy
-opencv-python
