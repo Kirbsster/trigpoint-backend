@@ -287,6 +287,38 @@ def _solve_with_edges(
             if target_y is not None:
                 y[idx] = float(target_y)
 
+    def _project_distance_constraints(target_shock_len: float) -> None:
+        for ei, edge in enumerate(edges):
+            ia, ib = edge.ia, edge.ib
+
+            if ei == driver_edge_idx and edge.is_shock:
+                target_L = max(1e-6, target_shock_len)
+            else:
+                target_L = edge.L0
+
+            dx = x[ib] - x[ia]
+            dy = y[ib] - y[ia]
+            dist = math.hypot(dx, dy) or 1e-9
+            diff = (dist - target_L) / dist
+
+            fa = fixed[ia]
+            fb = fixed[ib]
+
+            if fa and fb:
+                continue
+            elif fa and not fb:
+                x[ib] -= dx * diff
+                y[ib] -= dy * diff
+            elif fb and not fa:
+                x[ia] += dx * diff
+                y[ia] += dy * diff
+            else:
+                half = 0.5
+                x[ia] += dx * diff * half
+                y[ia] += dy * diff * half
+                x[ib] -= dx * diff * half
+                y[ib] -= dy * diff * half
+
     # Rear axle initial vertical position
     rear_y0 = y[rear_axle_idx] if rear_axle_idx is not None else None
 
@@ -314,40 +346,7 @@ def _solve_with_edges(
 
         # Iterative constraint projection
         for _ in range(iterations):
-            for ei, edge in enumerate(edges):
-                ia, ib = edge.ia, edge.ib
-
-                # Target length for this constraint
-                if ei == driver_edge_idx and edge.is_shock:
-                    target_L = max(1e-6, target_shock_len)
-                else:
-                    target_L = edge.L0
-
-                dx = x[ib] - x[ia]
-                dy = y[ib] - y[ia]
-                dist = math.hypot(dx, dy) or 1e-9
-                diff = (dist - target_L) / dist
-
-                fa = fixed[ia]
-                fb = fixed[ib]
-
-                if fa and fb:
-                    continue
-                elif fa and not fb:
-                    # Move only B
-                    x[ib] -= dx * diff
-                    y[ib] -= dy * diff
-                elif fb and not fa:
-                    # Move only A
-                    x[ia] += dx * diff
-                    y[ia] += dy * diff
-                else:
-                    # Both free → split correction
-                    half = 0.5
-                    x[ia] += dx * diff * half
-                    y[ia] += dy * diff * half
-                    x[ib] -= dx * diff * half
-                    y[ib] -= dy * diff * half
+            _project_distance_constraints(target_shock_len)
 
             # Rigid body shape matching (prevents collinear "bending")
             for group in rigid_groups or []:
@@ -390,6 +389,12 @@ def _solve_with_edges(
                     x[i] = cur_cx + tx
                     y[i] = cur_cy + ty
 
+            _apply_axis_constraints()
+
+        # Final length projection after the last rigid-group solve keeps the
+        # recorded zero-travel pose on the target shock eye-to-eye length.
+        for _ in range(3):
+            _project_distance_constraints(target_shock_len)
             _apply_axis_constraints()
 
         # --- Record this step ---
