@@ -736,8 +736,6 @@ async def update_bike_variant(
 
     update_doc: dict = {}
     if payload.name is not None:
-        if variant_doc.get("is_base"):
-            raise HTTPException(status_code=400, detail="Base variant name cannot be changed")
         name = payload.name.strip()
         if not name:
             raise HTTPException(status_code=400, detail="Variant name is required")
