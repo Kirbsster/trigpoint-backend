@@ -2141,6 +2141,72 @@ def _shock_length_mm_for_points(
     return None
 
 
+def _rear_axle_debug_summary(
+    steps: list[SolverStep],
+    rear_axle_point_id: Optional[str],
+    scale_mm_per_px: float,
+) -> dict:
+    summary: dict[str, object] = {
+        "rear_axle_point_id": rear_axle_point_id,
+        "step_count": len(steps or []),
+        "zero_point_px": None,
+        "final_point_px": None,
+        "delta_px": None,
+        "delta_mm": None,
+        "max_abs_dy_mm": None,
+        "max_abs_dx_mm": None,
+        "max_rear_travel_mm_from_steps": None,
+    }
+    if not steps or not rear_axle_point_id or not (scale_mm_per_px > 0):
+        return summary
+
+    coords: list[tuple[float, float]] = []
+    rear_travel_vals: list[float] = []
+    for step in steps:
+        if not isinstance(step, SolverStep):
+            continue
+        point_xy = step.points.get(rear_axle_point_id) if isinstance(step.points, dict) else None
+        if isinstance(point_xy, (list, tuple)) and len(point_xy) >= 2:
+            try:
+                coords.append((float(point_xy[0]), float(point_xy[1])))
+            except (TypeError, ValueError):
+                pass
+        if step.rear_travel is not None:
+            try:
+                value = float(step.rear_travel)
+                if math.isfinite(value):
+                    rear_travel_vals.append(value)
+            except (TypeError, ValueError):
+                pass
+
+    if not coords:
+        return summary
+
+    x0, y0 = coords[0]
+    x1, y1 = coords[-1]
+    dx_px = x1 - x0
+    dy_px = y1 - y0
+    max_abs_dx_px = max(abs(x - x0) for x, _ in coords)
+    max_abs_dy_px = max(abs(y - y0) for _, y in coords)
+    summary.update(
+        {
+            "zero_point_px": {"x": x0, "y": y0},
+            "final_point_px": {"x": x1, "y": y1},
+            "delta_px": {"x": dx_px, "y": dy_px},
+            "delta_mm": {
+                "x": dx_px * scale_mm_per_px,
+                "y": dy_px * scale_mm_per_px,
+            },
+            "max_abs_dx_mm": max_abs_dx_px * scale_mm_per_px,
+            "max_abs_dy_mm": max_abs_dy_px * scale_mm_per_px,
+            "max_rear_travel_mm_from_steps": (
+                max(abs(v) for v in rear_travel_vals) if rear_travel_vals else None
+            ),
+        }
+    )
+    return summary
+
+
 def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
     if not teeth or teeth <= 0:
         return None
@@ -3678,6 +3744,30 @@ async def compute_bike_kinematics(
         _round_to_nearest_10_mm(max(max_travel_candidates))
         if max_travel_candidates
         else None
+    )
+    rear_axle_debug = _rear_axle_debug_summary(
+        solver_steps,
+        result.rear_axle_point_id,
+        scale_mm_per_px,
+    )
+    result.debug["travel_debug"] = {
+        "front_wheel_size": str(settings.get("front_wheel_size", "29")),
+        "rear_wheel_size": str(settings.get("rear_wheel_size", "29")),
+        "scale_mm_per_px": scale_mm_per_px,
+        "trim_index": trim_index,
+        "max_travel_trim_mm": max_travel_trim,
+        "max_travel_full_mm": max_travel_full,
+        "max_rear_travel_mm": max_rear_travel_mm,
+        "rear_axle": rear_axle_debug,
+    }
+    print(
+        "[BikeVariantTravelDebug] "
+        f"bike={bike_id} variant={str(variant_doc.get('_id')) if variant_doc else 'base'} "
+        f"rear_wheel={str(settings.get('rear_wheel_size', '29'))} "
+        f"front_wheel={str(settings.get('front_wheel_size', '29'))} "
+        f"scale_mm_per_px={scale_mm_per_px:.6f} "
+        f"trim_mm={max_travel_trim} full_mm={max_travel_full} "
+        f"rear_axle={rear_axle_debug}"
     )
 
     kin_doc = {
