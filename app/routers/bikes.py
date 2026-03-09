@@ -2451,6 +2451,28 @@ def _compute_rear_wheel_force_series(
     return out
 
 
+def _compute_rear_wheel_force_n_series(
+    shock_force_series: list[Optional[float]],
+    leverage_ratio_series: list[Optional[float]],
+) -> list[Optional[float]]:
+    length = min(len(shock_force_series), len(leverage_ratio_series))
+    if length <= 0:
+        return []
+    out: list[Optional[float]] = []
+    for idx in range(length):
+        shock_force = _parse_optional_finite(shock_force_series[idx])
+        leverage = _parse_optional_finite(leverage_ratio_series[idx])
+        if shock_force is None or leverage is None:
+            out.append(None)
+            continue
+        if not (abs(leverage) > 1e-9):
+            out.append(None)
+            continue
+        value = shock_force / leverage
+        out.append(value if math.isfinite(value) else None)
+    return out
+
+
 def _compute_top_external_tangent(
     c1: tuple[float, float],
     r1: float,
@@ -3512,9 +3534,11 @@ async def compute_bike_kinematics(
     shock_spring_rate_cold_series: list[Optional[float]] = []
     shock_spring_rate_hot_series: list[Optional[float]] = []
     rear_wheel_force_series: list[Optional[float]] = []
+    rear_wheel_force_n_series: list[Optional[float]] = []
     shock_force_full: list[Optional[float]] = []
     shock_spring_rate_full: list[Optional[float]] = []
     rear_wheel_force_full: list[Optional[float]] = []
+    rear_wheel_force_n_full: list[Optional[float]] = []
     trim_index = 0
     front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
     bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
@@ -3632,9 +3656,17 @@ async def compute_bike_kinematics(
             leverage_ratio_series,
             shock_spring_rate_series,
         )
+        rear_wheel_force_n_series = _compute_rear_wheel_force_n_series(
+            shock_force_series,
+            leverage_ratio_series,
+        )
         rear_wheel_force_full = _compute_rear_wheel_force_series(
             leverage_ratio_full,
             shock_spring_rate_full,
+        )
+        rear_wheel_force_n_full = _compute_rear_wheel_force_n_series(
+            shock_force_full,
+            leverage_ratio_full,
         )
 
         anti_squat_series = _compute_anti_squat_series(
@@ -3698,6 +3730,9 @@ async def compute_bike_kinematics(
         rear_wheel_force_val = (
             rear_wheel_force_series[idx] if idx < len(rear_wheel_force_series) else None
         )
+        rear_wheel_force_n_val = (
+            rear_wheel_force_n_series[idx] if idx < len(rear_wheel_force_n_series) else None
+        )
         s.anti_squat = anti_squat_val
         s.anti_rise = anti_rise_val
         s.shock_spring_rate = shock_rate_val
@@ -3713,6 +3748,7 @@ async def compute_bike_kinematics(
                 "anti_rise": anti_rise_val,          # [%]
                 "shock_spring_rate": shock_rate_val,  # [N/mm]
                 "rear_wheel_force": rear_wheel_force_val,  # [N/mm]
+                "rear_wheel_force_n": rear_wheel_force_n_val,  # [N]
             }
         )
 
@@ -3727,6 +3763,7 @@ async def compute_bike_kinematics(
         "shock_spring_rate_cold_n_per_mm": shock_spring_rate_cold_series,
         "shock_spring_rate_hot_n_per_mm": shock_spring_rate_hot_series,
         "rear_wheel_force_n_per_mm": rear_wheel_force_series,
+        "rear_wheel_force_n": rear_wheel_force_n_series,
         "shock_type": shock_type,
         "shock_model": shock_model,
         "instant_center_coords": instant_center_coords,
@@ -3739,6 +3776,7 @@ async def compute_bike_kinematics(
         "shock_force_n_full": shock_force_full,
         "shock_spring_rate_n_per_mm_full": shock_spring_rate_full,
         "rear_wheel_force_n_per_mm_full": rear_wheel_force_full,
+        "rear_wheel_force_n_full": rear_wheel_force_n_full,
         "instant_center_coords_full": instant_center_coords_full,
         "rear_brake_caliper_point_id": brake_caliper_point_id,
     }
