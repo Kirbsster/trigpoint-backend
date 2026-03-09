@@ -542,6 +542,36 @@ def _apply_variant_overrides_to_geometry(
     return geom
 
 
+def _apply_variant_point_overrides_to_points(
+    points: List[BikePoint],
+    overrides: Optional[dict],
+) -> List[BikePoint]:
+    if not points:
+        return []
+    if not isinstance(overrides, dict):
+        return [point.copy(deep=True) for point in points]
+    point_overrides = overrides.get("point_overrides")
+    if not isinstance(point_overrides, dict):
+        return [point.copy(deep=True) for point in points]
+
+    out: List[BikePoint] = []
+    for point in points:
+        point_id = str(point.id or "")
+        override = point_overrides.get(point_id)
+        if not isinstance(override, dict):
+            out.append(point.copy(deep=True))
+            continue
+        update: dict[str, float] = {}
+        x_value = override.get("x")
+        y_value = override.get("y")
+        if x_value is not None:
+            update["x"] = float(x_value)
+        if y_value is not None:
+            update["y"] = float(y_value)
+        out.append(point.copy(update=update) if update else point.copy(deep=True))
+    return out
+
+
 def _apply_variant_overrides_to_bodies(
     bodies: List[RigidBody],
     overrides: Optional[dict],
@@ -593,6 +623,33 @@ def _variant_fingerprint(
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()
+
+
+def _build_variant_point_overrides(
+    base_points: List[BikePoint],
+    variant_points: List[BikePoint],
+    tolerance_px: float = 1e-6,
+) -> dict[str, dict[str, float]]:
+    base_by_id = {str(point.id): point for point in base_points if point.id}
+    variant_by_id = {str(point.id): point for point in variant_points if point.id}
+    if set(base_by_id.keys()) != set(variant_by_id.keys()):
+        raise HTTPException(
+            status_code=400,
+            detail="Variant point overrides can only move existing points.",
+        )
+
+    overrides: dict[str, dict[str, float]] = {}
+    for point_id, base_point in base_by_id.items():
+        variant_point = variant_by_id[point_id]
+        dx = float(variant_point.x) - float(base_point.x)
+        dy = float(variant_point.y) - float(base_point.y)
+        if abs(dx) <= tolerance_px and abs(dy) <= tolerance_px:
+            continue
+        overrides[point_id] = {
+            "x": float(variant_point.x),
+            "y": float(variant_point.y),
+        }
+    return overrides
 
 
 def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
@@ -1286,6 +1343,60 @@ async def update_bike_points(
     hero_url = await resolve_hero_url(hero_id)
     hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
     return bike_doc_to_out(updated, hero_url=hero_url, hero_thumb_url=hero_thumb_url, can_edit=True)
+
+
+@router.put("/variants/{variant_id}/points", response_model=BikeVariantOut)
+async def update_variant_points(
+    variant_id: str,
+    payload: BikePointsUpdate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    is_admin = _is_admin_user(current_user)
+
+    _ensure_unique_point_ids(payload.points)
+
+    variant_doc = await _load_variant_or_404(variant_id)
+    bike_doc = await bikes_col().find_one({"_id": variant_doc["bike_id"]})
+    if not bike_doc or not (is_admin or _is_bike_owner(bike_doc, user_oid)):
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    base_points: List[BikePoint] = []
+    for raw_point in bike_doc.get("points") or []:
+        try:
+            base_points.append(BikePoint(**raw_point))
+        except Exception as exc:
+            logging.warning(
+                "Skipping invalid base point on bike %s while saving variant points: %r (%s)",
+                bike_doc.get("_id"),
+                raw_point,
+                exc,
+            )
+    if not base_points:
+        raise HTTPException(status_code=400, detail="Bike has no valid base points defined")
+
+    point_overrides = _build_variant_point_overrides(base_points, payload.points)
+    next_overrides = (
+        dict(variant_doc.get("overrides") or {})
+        if isinstance(variant_doc.get("overrides"), dict)
+        else {}
+    )
+    if point_overrides:
+        next_overrides["point_overrides"] = point_overrides
+    else:
+        next_overrides.pop("point_overrides", None)
+
+    update_doc = {
+        "overrides": next_overrides,
+        "pose_cache": None,
+        "kinematics_cache": None,
+        "cache_fingerprint": None,
+        "status": "stale",
+        "updated_at": datetime.utcnow(),
+    }
+    await bike_variants_col().update_one({"_id": variant_doc["_id"]}, {"$set": update_doc})
+    merged = {**variant_doc, **update_doc}
+    return _variant_doc_to_out(merged)
 
 
 @router.get("/{bike_id}/bodies", response_model=BikeBodiesOut)
@@ -3151,6 +3262,7 @@ async def compute_bike_kinematics(
             )
     if not points:
         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
+    points = _apply_variant_point_overrides_to_points(points, variant_overrides)
 
     settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
     base_settings = settings_doc.get("settings") if settings_doc else {}
