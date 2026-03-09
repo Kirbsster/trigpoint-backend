@@ -1765,6 +1765,64 @@ def _compute_instant_center_series(
     - {"x": float, "y": float} when resolvable
     - {"x": None, "y": None} when near-pure translation / underconstrained
     """
+    def _extract_matched_body_coords(
+        step_a: SolverStep,
+        step_b: SolverStep,
+        ids_local: list[str],
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        coords_a: list[tuple[float, float]] = []
+        coords_b: list[tuple[float, float]] = []
+        for pid in ids_local:
+            point_a = step_a.points.get(pid)
+            point_b = step_b.points.get(pid)
+            if not point_a or not point_b:
+                continue
+            try:
+                ax = float(point_a[0])
+                ay = float(point_a[1])
+                bx = float(point_b[0])
+                by = float(point_b[1])
+            except Exception:
+                continue
+            if not (math.isfinite(ax) and math.isfinite(ay) and math.isfinite(bx) and math.isfinite(by)):
+                continue
+            coords_a.append((ax, ay))
+            coords_b.append((bx, by))
+        return coords_a, coords_b
+
+    def _finite_rotation_center(
+        src_pts: list[tuple[float, float]],
+        dst_pts: list[tuple[float, float]],
+    ) -> Optional[tuple[float, float]]:
+        if len(src_pts) != len(dst_pts) or len(src_pts) < 2:
+            return None
+        try:
+            P = np.asarray(src_pts, dtype=float)
+            Q = np.asarray(dst_pts, dtype=float)
+            cP = P.mean(axis=0)
+            cQ = Q.mean(axis=0)
+            P0 = P - cP
+            Q0 = Q - cQ
+            H = P0.T @ Q0
+            U, _, Vt = np.linalg.svd(H)
+            R = Vt.T @ U.T
+            if np.linalg.det(R) < 0:
+                Vt[-1, :] *= -1.0
+                R = Vt.T @ U.T
+            t = cQ - (R @ cP)
+            A = np.eye(2, dtype=float) - R
+            detA = float(np.linalg.det(A))
+            if not math.isfinite(detA) or abs(detA) < 1e-9:
+                return None
+            center = np.linalg.solve(A, t)
+            x_ic = float(center[0])
+            y_ic = float(center[1])
+            if not (math.isfinite(x_ic) and math.isfinite(y_ic)):
+                return None
+            return (x_ic, y_ic)
+        except Exception:
+            return None
+
     out: list[dict[str, Optional[float]]] = []
     if not steps:
         return out
@@ -1773,100 +1831,30 @@ def _compute_instant_center_series(
         return [{"x": None, "y": None} for _ in steps]
 
     n_steps = len(steps)
-    omega_eps = 1e-9
+    if n_steps == 1:
+        return [{"x": None, "y": None}]
 
     for i in range(n_steps):
-        rows: list[list[float]] = []
-        rhs: list[float] = []
+        if i == 0:
+            src_step = steps[0]
+            dst_step = steps[1]
+        elif i == n_steps - 1:
+            src_step = steps[n_steps - 2]
+            dst_step = steps[n_steps - 1]
+        else:
+            src_step = steps[i - 1]
+            dst_step = steps[i + 1]
 
-        for pid in ids:
-            p_now = steps[i].points.get(pid)
-            if not p_now:
-                continue
-            try:
-                x = float(p_now[0])
-                y = float(p_now[1])
-            except Exception:
-                continue
-
-            try:
-                # Use centered differences for interior steps and 3-point one-sided
-                # stencils at boundaries for better endpoint stability.
-                if n_steps >= 3 and i == 0:
-                    p0 = steps[0].points.get(pid)
-                    p1 = steps[1].points.get(pid)
-                    p2 = steps[2].points.get(pid)
-                    if not p0 or not p1 or not p2:
-                        continue
-                    x0, y0 = float(p0[0]), float(p0[1])
-                    x1, y1 = float(p1[0]), float(p1[1])
-                    x2, y2 = float(p2[0]), float(p2[1])
-                    vx = (-3.0 * x0 + 4.0 * x1 - x2) * 0.5
-                    vy = (-3.0 * y0 + 4.0 * y1 - y2) * 0.5
-                elif n_steps >= 3 and i == (n_steps - 1):
-                    p0 = steps[n_steps - 1].points.get(pid)
-                    p1 = steps[n_steps - 2].points.get(pid)
-                    p2 = steps[n_steps - 3].points.get(pid)
-                    if not p0 or not p1 or not p2:
-                        continue
-                    x0, y0 = float(p0[0]), float(p0[1])
-                    x1, y1 = float(p1[0]), float(p1[1])
-                    x2, y2 = float(p2[0]), float(p2[1])
-                    vx = (3.0 * x0 - 4.0 * x1 + x2) * 0.5
-                    vy = (3.0 * y0 - 4.0 * y1 + y2) * 0.5
-                elif i <= 0:
-                    p0 = steps[0].points.get(pid)
-                    p1 = steps[1].points.get(pid)
-                    if not p0 or not p1:
-                        continue
-                    vx = float(p1[0]) - float(p0[0])
-                    vy = float(p1[1]) - float(p0[1])
-                elif i >= n_steps - 1:
-                    p0 = steps[n_steps - 2].points.get(pid)
-                    p1 = steps[n_steps - 1].points.get(pid)
-                    if not p0 or not p1:
-                        continue
-                    vx = float(p1[0]) - float(p0[0])
-                    vy = float(p1[1]) - float(p0[1])
-                else:
-                    p0 = steps[i - 1].points.get(pid)
-                    p1 = steps[i + 1].points.get(pid)
-                    if not p0 or not p1:
-                        continue
-                    vx = (float(p1[0]) - float(p0[0])) * 0.5
-                    vy = (float(p1[1]) - float(p0[1])) * 0.5
-            except Exception:
-                continue
-
-            # v = [Vx, Vy] + omega * [-y, x]
-            rows.append([1.0, 0.0, -y])
-            rhs.append(vx)
-            rows.append([0.0, 1.0, x])
-            rhs.append(vy)
-
-        if len(rows) < 4:
+        src_pts, dst_pts = _extract_matched_body_coords(src_step, dst_step, ids)
+        if len(src_pts) < 2:
             out.append({"x": None, "y": None})
             continue
 
-        try:
-            A = np.asarray(rows, dtype=float)
-            b = np.asarray(rhs, dtype=float)
-            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
-            Vx, Vy, omega = float(sol[0]), float(sol[1]), float(sol[2])
-        except Exception:
+        ic = _finite_rotation_center(src_pts, dst_pts)
+        if ic is None:
             out.append({"x": None, "y": None})
             continue
-
-        if not np.isfinite(omega) or abs(omega) < omega_eps:
-            out.append({"x": None, "y": None})
-            continue
-
-        x_ic = -Vy / omega
-        y_ic = Vx / omega
-        if not np.isfinite(x_ic) or not np.isfinite(y_ic):
-            out.append({"x": None, "y": None})
-            continue
-        out.append({"x": float(x_ic), "y": float(y_ic)})
+        out.append({"x": float(ic[0]), "y": float(ic[1])})
 
     return out
 
