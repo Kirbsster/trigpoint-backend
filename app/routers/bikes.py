@@ -3331,6 +3331,11 @@ async def compute_bike_kinematics(
         else []
     )
     scale_mm = scale_mm_per_px  # mm per px
+    shared_step_objects = (
+        bool(solver_steps)
+        and len(solver_steps) == len(full_steps)
+        and all(step is full_steps[idx] for idx, step in enumerate(solver_steps))
+    )
 
     for s in solver_steps:
         # These came out of the solver in px
@@ -3338,11 +3343,12 @@ async def compute_bike_kinematics(
         s.shock_length = s.shock_length * scale_mm   # → mm
         if s.rear_travel is not None:
             s.rear_travel = s.rear_travel * scale_mm # → mm
-    for s in full_steps:
-        s.shock_stroke = s.shock_stroke * scale_mm
-        s.shock_length = s.shock_length * scale_mm
-        if s.rear_travel is not None:
-            s.rear_travel = s.rear_travel * scale_mm
+    if not shared_step_objects:
+        for s in full_steps:
+            s.shock_stroke = s.shock_stroke * scale_mm
+            s.shock_length = s.shock_length * scale_mm
+            if s.rear_travel is not None:
+                s.rear_travel = s.rear_travel * scale_mm
     if full_steps:
         result.full_steps = full_steps
 
