@@ -572,33 +572,34 @@ def _apply_variant_point_overrides_to_points(
     return out
 
 
-def _build_variant_point_constraints(
+def _resolve_shock_length0_px(
     points: List[BikePoint],
-    overrides: Optional[dict],
-) -> dict[str, dict[str, float]]:
-    if not points:
-        return {}
-    if not isinstance(overrides, dict):
-        return {}
-    point_overrides = overrides.get("point_overrides")
-    if not isinstance(point_overrides, dict):
-        return {}
+    bodies: List[RigidBody],
+    geom: Optional[dict],
+    scale_mm_per_px: float,
+) -> Optional[float]:
+    shock_eye_mm = _parse_optional_finite((geom or {}).get("shock_eye_mm"))
+    if shock_eye_mm is not None and scale_mm_per_px > 0:
+        return shock_eye_mm / scale_mm_per_px
 
     point_by_id = {str(point.id or ""): point for point in points if str(point.id or "")}
-    constraints: dict[str, dict[str, float]] = {}
-    for point_id, override in point_overrides.items():
-        point_id_str = str(point_id or "").strip()
-        point = point_by_id.get(point_id_str)
-        if not point_id_str or point is None or not isinstance(override, dict):
+    for body in bodies or []:
+        if body.type != "shock":
             continue
-        constraint: dict[str, float] = {}
-        if override.get("x") is not None:
-            constraint["x"] = float(point.x)
-        if override.get("y") is not None:
-            constraint["y"] = float(point.y)
-        if constraint:
-            constraints[point_id_str] = constraint
-    return constraints
+        if body.length0 is not None:
+            try:
+                return float(body.length0)
+            except (TypeError, ValueError):
+                pass
+        point_ids = [str(pid).strip() for pid in (body.point_ids or []) if str(pid).strip()]
+        if len(point_ids) < 2:
+            continue
+        point_a = point_by_id.get(point_ids[0])
+        point_b = point_by_id.get(point_ids[1])
+        if point_a is None or point_b is None:
+            continue
+        return math.hypot(float(point_b.x) - float(point_a.x), float(point_b.y) - float(point_a.y))
+    return None
 
 
 def _apply_variant_overrides_to_bodies(
@@ -2245,7 +2246,6 @@ def _compute_variant_rest_pose(
     base_settings: dict,
     effective_settings: dict,
     iterations: int,
-    override_point_constraints: Optional[dict[str, dict[str, float]]] = None,
 ) -> tuple[List[BikePoint], dict]:
     if not (scale_mm_per_px > 0):
         return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
@@ -2273,21 +2273,14 @@ def _compute_variant_rest_pose(
     ground_contact_y = rear_contact_y
 
     point_constraints = {
-        str(point_id): {
-            key: float(value)
-            for key, value in constraint.items()
-            if key in {"x", "y"} and value is not None
-        }
-        for point_id, constraint in (override_point_constraints or {}).items()
-        if isinstance(constraint, dict)
-    }
-    point_constraints.setdefault(str(bb_point.id), {})["x"] = float(bb_point.x)
-    point_constraints.setdefault(str(rear_axle_point.id), {})["y"] = (
+        str(bb_point.id): {"x": float(bb_point.x)},
+        str(rear_axle_point.id): {"y": (
         ground_contact_y - new_rear_radius_px
-    )
-    point_constraints.setdefault(str(front_axle_point.id), {})["y"] = (
+        )},
+        str(front_axle_point.id): {"y": (
         ground_contact_y - new_front_radius_px
-    )
+        )},
+    }
     solved_points, debug = solve_bike_rest_pose(
         points,
         bodies,
@@ -3484,6 +3477,15 @@ async def compute_bike_kinematics(
 
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
+    shock_length0_px = _resolve_shock_length0_px(points, bodies_for_solver, geom, scale_mm_per_px)
+    if shock_length0_px is not None:
+        normalized_bodies_for_solver: List[RigidBody] = []
+        for body in bodies_for_solver:
+            if body.type == "shock":
+                normalized_bodies_for_solver.append(body.copy(update={"length0": float(shock_length0_px)}))
+            else:
+                normalized_bodies_for_solver.append(body)
+        bodies_for_solver = normalized_bodies_for_solver
 
     if variant_doc is not None:
         variant_fingerprint = _variant_fingerprint(
@@ -3501,18 +3503,13 @@ async def compute_bike_kinematics(
             points=points,
             bodies=bodies_for_solver,
         ):
-            variant_point_constraints = _build_variant_point_constraints(
-                variant_target_points,
-                variant_overrides,
-            )
             solved_points, pose_debug = _compute_variant_rest_pose(
-                points=points,
+                points=variant_target_points,
                 bodies=bodies_for_solver,
                 scale_mm_per_px=scale_mm_per_px,
                 base_settings=base_settings,
                 effective_settings=settings,
                 iterations=iterations,
-                override_point_constraints=variant_point_constraints,
             )
             points = solved_points
         else:
