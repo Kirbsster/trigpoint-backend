@@ -532,118 +532,236 @@ def solve_bike_rest_pose(
     point_constraints: Dict[str, Dict[str, float]],
     iterations: int = 800,
 ) -> tuple[List[BikePoint], Dict[str, object]]:
-    (
-        edges,
-        fixed,
-        _rear_axle_idx,
-        driver_edge_idx,
-        driver_L0,
-        _driver_stroke,
-        rigid_groups,
-    ) = _build_internal_model(
-        points,
-        bodies,
-        lock_point_types=False,
-        include_fixed_body_rigid_groups=True,
-    )
-
-    # In rest-pose solving the frame reference points must move as a single
-    # rigid carrier. Otherwise the BB/fixed points can satisfy axis
-    # constraints independently and "shear" relative to one another.
-    point_index_by_id = {p.id: idx for idx, p in enumerate(points)}
-    frame_anchor_ids: set[str] = {
-        str(p.id)
-        for p in points
-        if str(getattr(p, "type", "") or "").strip().lower() in {"fixed", "bb"}
-    }
-    for body in bodies or []:
-        if str(getattr(body, "type", "") or "").strip().lower() != "fixed":
-            continue
-        for pid in getattr(body, "point_ids", None) or []:
-            if pid:
-                frame_anchor_ids.add(str(pid))
-
-    frame_anchor_indices = [
-        idx for pid, idx in point_index_by_id.items() if pid in frame_anchor_ids
-    ]
-    if len(frame_anchor_indices) >= 2:
-        existing_pairs = {
-            tuple(sorted((edge.ia, edge.ib)))
-            for edge in edges
+    point_by_id = {str(point.id): point for point in points if str(point.id)}
+    if not point_by_id:
+        return [], {
+            "mode": "rest_pose",
+            "point_constraints": point_constraints,
+            "max_constraint_error_px": 0.0,
+            "max_body_fit_error_px": 0.0,
+            "iterations_used": 0,
+            "body_count": 0,
         }
-        for i in range(len(frame_anchor_indices) - 1):
-            ia = frame_anchor_indices[i]
-            for j in range(i + 1, len(frame_anchor_indices)):
-                ib = frame_anchor_indices[j]
-                pair = tuple(sorted((ia, ib)))
-                if pair in existing_pairs:
-                    continue
-                dx = points[ib].x - points[ia].x
-                dy = points[ib].y - points[ia].y
-                edges.append(LinkEdge(ia=ia, ib=ib, L0=math.hypot(dx, dy), is_shock=False))
-                existing_pairs.add(pair)
-    if len(frame_anchor_indices) >= 3:
-        rest = [(points[i].x, points[i].y) for i in frame_anchor_indices]
-        cx = sum(p[0] for p in rest) / len(rest)
-        cy = sum(p[1] for p in rest) / len(rest)
-        rigid_groups.append(
-            {
-                "indices": frame_anchor_indices,
-                "rest": rest,
-                "rest_cx": cx,
-                "rest_cy": cy,
-            }
-        )
 
-    axis_constraints: Dict[int, Dict[str, float]] = {}
+    constraints_by_id: Dict[str, Dict[str, float]] = {}
     for point_id, constraint in (point_constraints or {}).items():
-        idx = point_index_by_id.get(str(point_id))
-        if idx is None:
+        point_id_str = str(point_id or "").strip()
+        if not point_id_str or point_id_str not in point_by_id or not isinstance(constraint, dict):
             continue
-        axis_constraints[idx] = {
+        normalized = {
             key: float(value)
             for key, value in constraint.items()
             if key in {"x", "y"} and value is not None
         }
+        if normalized:
+            constraints_by_id[point_id_str] = normalized
 
-    result = _solve_with_edges(
-        points=points,
-        edges=edges,
-        fixed=fixed,
-        rear_axle_idx=None,
-        driver_edge_idx=driver_edge_idx,
-        driver_L0=driver_L0,
-        driver_stroke=0.0,
-        rigid_groups=rigid_groups,
-        n_steps=1,
-        iterations=max(1, iterations),
-        pre_steps=0,
-        axis_constraints=axis_constraints,
-    )
+    body_models: List[Dict[str, object]] = []
 
-    solved_positions = result.steps[-1].points if result.steps else {}
+    def _append_body_model(body_id: str, point_ids: List[str], ref_positions: List[Tuple[float, float]], body_type: str) -> None:
+        normalized_ids = [str(pid or "").strip() for pid in point_ids if str(pid or "").strip()]
+        if len(normalized_ids) < 2 or len(normalized_ids) != len(ref_positions):
+            return
+        body_models.append(
+            {
+                "id": body_id,
+                "type": body_type,
+                "point_ids": normalized_ids,
+                "ref_positions": [(float(x), float(y)) for x, y in ref_positions],
+            }
+        )
+
+    for body in bodies or []:
+        point_ids = [str(pid or "").strip() for pid in (getattr(body, "point_ids", None) or []) if str(pid or "").strip()]
+        if len(point_ids) < 2:
+            continue
+        ref_positions = []
+        missing_point = False
+        for point_id in point_ids:
+            point = point_by_id.get(point_id)
+            if point is None:
+                missing_point = True
+                break
+            ref_positions.append((float(point.x), float(point.y)))
+        if missing_point:
+            continue
+
+        body_type = str(getattr(body, "type", "") or "").strip().lower()
+        if body_type == "shock" and len(ref_positions) >= 2:
+            base_ax, base_ay = ref_positions[0]
+            base_bx, base_by = ref_positions[1]
+            shock_length = getattr(body, "length0", None)
+            if shock_length is not None:
+                dx = base_bx - base_ax
+                dy = base_by - base_ay
+                dist = math.hypot(dx, dy)
+                if dist > 1e-9:
+                    ux = dx / dist
+                    uy = dy / dist
+                else:
+                    ux, uy = 1.0, 0.0
+                normalized_bx = base_ax + ux * float(shock_length)
+                normalized_by = base_ay + uy * float(shock_length)
+                offset_x = normalized_bx - base_bx
+                offset_y = normalized_by - base_by
+                adjusted_positions = [(base_ax, base_ay), (normalized_bx, normalized_by)]
+                for extra_x, extra_y in ref_positions[2:]:
+                    adjusted_positions.append((extra_x + offset_x, extra_y + offset_y))
+                ref_positions = adjusted_positions
+
+        _append_body_model(
+            str(getattr(body, "id", "") or f"body_{len(body_models) + 1}"),
+            point_ids,
+            ref_positions,
+            body_type,
+        )
+
+    fixed_body_point_ids = [
+        str(point.id)
+        for point in points
+        if str(getattr(point, "type", "") or "").strip().lower() in {"fixed", "bb"}
+    ]
+    if len(fixed_body_point_ids) >= 2:
+        ref_positions = [
+            (float(point_by_id[point_id].x), float(point_by_id[point_id].y))
+            for point_id in fixed_body_point_ids
+            if point_id in point_by_id
+        ]
+        if len(ref_positions) == len(fixed_body_point_ids):
+            _append_body_model("__fixed_frame__", fixed_body_point_ids, ref_positions, "fixed_frame")
+
+    current_positions: Dict[str, Tuple[float, float]] = {
+        point_id: (float(point.x), float(point.y))
+        for point_id, point in point_by_id.items()
+    }
+    for point_id, constraint in constraints_by_id.items():
+        cur_x, cur_y = current_positions[point_id]
+        current_positions[point_id] = (
+            float(constraint.get("x", cur_x)),
+            float(constraint.get("y", cur_y)),
+        )
+
+    def _fit_body(ref_positions: List[Tuple[float, float]], target_positions: List[Tuple[float, float]]) -> Tuple[float, float, float, float]:
+        if len(ref_positions) != len(target_positions) or not ref_positions:
+            return 1.0, 0.0, 0.0, 0.0
+        if len(ref_positions) == 1:
+            qx, qy = ref_positions[0]
+            px, py = target_positions[0]
+            return 1.0, 0.0, px - qx, py - qy
+
+        ref_cx = sum(x for x, _ in ref_positions) / len(ref_positions)
+        ref_cy = sum(y for _, y in ref_positions) / len(ref_positions)
+        target_cx = sum(x for x, _ in target_positions) / len(target_positions)
+        target_cy = sum(y for _, y in target_positions) / len(target_positions)
+
+        a = 0.0
+        b = 0.0
+        for (qx, qy), (px, py) in zip(ref_positions, target_positions):
+            qcx = qx - ref_cx
+            qcy = qy - ref_cy
+            pcx = px - target_cx
+            pcy = py - target_cy
+            a += pcx * qcx + pcy * qcy
+            b += pcy * qcx - pcx * qcy
+
+        denom = math.hypot(a, b)
+        if denom < 1e-9:
+            cos_t = 1.0
+            sin_t = 0.0
+        else:
+            cos_t = a / denom
+            sin_t = b / denom
+
+        tx = target_cx - (cos_t * ref_cx - sin_t * ref_cy)
+        ty = target_cy - (sin_t * ref_cx + cos_t * ref_cy)
+        return cos_t, sin_t, tx, ty
+
+    def _apply_body_transform(
+        ref_positions: List[Tuple[float, float]],
+        transform: Tuple[float, float, float, float],
+    ) -> List[Tuple[float, float]]:
+        cos_t, sin_t, tx, ty = transform
+        out: List[Tuple[float, float]] = []
+        for x_val, y_val in ref_positions:
+            out.append(
+                (
+                    cos_t * x_val - sin_t * y_val + tx,
+                    sin_t * x_val + cos_t * y_val + ty,
+                )
+            )
+        return out
+
+    iterations_used = 0
+    max_body_fit_error = 0.0
+    max_step_delta = 0.0
+    for _ in range(max(1, iterations)):
+        iterations_used += 1
+        predicted_by_point: Dict[str, List[Tuple[float, float]]] = {}
+        max_body_fit_error = 0.0
+
+        for body_model in body_models:
+            body_point_ids = body_model["point_ids"]  # type: ignore[assignment]
+            ref_positions = body_model["ref_positions"]  # type: ignore[assignment]
+            target_positions = [current_positions[point_id] for point_id in body_point_ids]
+            transform = _fit_body(ref_positions, target_positions)
+            predicted_positions = _apply_body_transform(ref_positions, transform)
+            for point_id, target_position, predicted_position in zip(body_point_ids, target_positions, predicted_positions):
+                predicted_by_point.setdefault(point_id, []).append(predicted_position)
+                dx = predicted_position[0] - target_position[0]
+                dy = predicted_position[1] - target_position[1]
+                max_body_fit_error = max(max_body_fit_error, math.hypot(dx, dy))
+
+        next_positions: Dict[str, Tuple[float, float]] = {}
+        max_step_delta = 0.0
+        for point_id, current_position in current_positions.items():
+            predictions = predicted_by_point.get(point_id)
+            if predictions:
+                avg_x = sum(x for x, _ in predictions) / len(predictions)
+                avg_y = sum(y for _, y in predictions) / len(predictions)
+            else:
+                avg_x, avg_y = current_position
+
+            constraint = constraints_by_id.get(point_id)
+            if constraint:
+                if constraint.get("x") is not None:
+                    avg_x = float(constraint["x"])
+                if constraint.get("y") is not None:
+                    avg_y = float(constraint["y"])
+
+            dx = avg_x - current_position[0]
+            dy = avg_y - current_position[1]
+            max_step_delta = max(max_step_delta, math.hypot(dx, dy))
+            next_positions[point_id] = (avg_x, avg_y)
+
+        current_positions = next_positions
+        if max_step_delta <= 1e-6 and max_body_fit_error <= 1e-6:
+            break
+
     solved_points: List[BikePoint] = []
     max_constraint_error = 0.0
     for point in points:
-        coords = solved_positions.get(point.id)
+        coords = current_positions.get(point.id)
         if coords is None:
             solved_points.append(point)
             continue
         x_val = float(coords[0])
         y_val = float(coords[1])
-        constraint = point_constraints.get(point.id) or {}
+        constraint = constraints_by_id.get(point.id) or {}
         if constraint.get("x") is not None:
             max_constraint_error = max(max_constraint_error, abs(x_val - float(constraint["x"])))
         if constraint.get("y") is not None:
             max_constraint_error = max(max_constraint_error, abs(y_val - float(constraint["y"])))
         solved_points.append(point.copy(update={"x": x_val, "y": y_val}))
 
-    debug = dict(result.debug or {})
-    debug.update(
-        {
-            "mode": "rest_pose",
-            "point_constraints": point_constraints,
-            "max_constraint_error_px": max_constraint_error,
-        }
-    )
+    debug = {
+        "mode": "rest_pose",
+        "solver": "rigid_body_projection_v1",
+        "point_constraints": constraints_by_id,
+        "max_constraint_error_px": max_constraint_error,
+        "max_body_fit_error_px": max_body_fit_error,
+        "max_step_delta_px": max_step_delta,
+        "iterations_used": iterations_used,
+        "body_count": len(body_models),
+        "body_ids": [str(body_model.get("id") or "") for body_model in body_models],
+    }
     return solved_points, debug
