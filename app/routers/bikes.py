@@ -602,6 +602,35 @@ def _resolve_shock_length0_px(
     return None
 
 
+def _build_variant_point_constraints(
+    target_points: List[BikePoint],
+    overrides: Optional[dict],
+) -> dict[str, dict[str, float]]:
+    if not target_points:
+        return {}
+    if not isinstance(overrides, dict):
+        return {}
+    point_overrides = overrides.get("point_overrides")
+    if not isinstance(point_overrides, dict):
+        return {}
+
+    target_by_id = {str(point.id or ""): point for point in target_points if str(point.id or "")}
+    constraints: dict[str, dict[str, float]] = {}
+    for point_id, override in point_overrides.items():
+        point_id_str = str(point_id or "").strip()
+        target_point = target_by_id.get(point_id_str)
+        if not point_id_str or target_point is None or not isinstance(override, dict):
+            continue
+        constraint: dict[str, float] = {}
+        if override.get("x") is not None:
+            constraint["x"] = float(target_point.x)
+        if override.get("y") is not None:
+            constraint["y"] = float(target_point.y)
+        if constraint:
+            constraints[point_id_str] = constraint
+    return constraints
+
+
 def _apply_variant_overrides_to_bodies(
     bodies: List[RigidBody],
     overrides: Optional[dict],
@@ -2246,6 +2275,7 @@ def _compute_variant_rest_pose(
     base_settings: dict,
     effective_settings: dict,
     iterations: int,
+    override_point_constraints: Optional[dict[str, dict[str, float]]] = None,
 ) -> tuple[List[BikePoint], dict]:
     if not (scale_mm_per_px > 0):
         return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
@@ -2273,14 +2303,39 @@ def _compute_variant_rest_pose(
     ground_contact_y = rear_contact_y
 
     point_constraints = {
-        str(bb_point.id): {"x": float(bb_point.x)},
-        str(rear_axle_point.id): {"y": (
-        ground_contact_y - new_rear_radius_px
-        )},
-        str(front_axle_point.id): {"y": (
-        ground_contact_y - new_front_radius_px
-        )},
+        str(point_id): {
+            key: float(value)
+            for key, value in constraint.items()
+            if key in {"x", "y"} and value is not None
+        }
+        for point_id, constraint in (override_point_constraints or {}).items()
+        if isinstance(constraint, dict)
     }
+    fixed_body_point_ids: set[str] = {
+        str(point.id)
+        for point in points
+        if str(getattr(point, "type", "") or "").strip().lower() in {"fixed", "bb"}
+    }
+    for body in bodies or []:
+        if str(getattr(body, "type", "") or "").strip().lower() != "fixed":
+            continue
+        for point_id in getattr(body, "point_ids", None) or []:
+            point_id_str = str(point_id or "").strip()
+            if point_id_str:
+                fixed_body_point_ids.add(point_id_str)
+
+    has_fixed_body_driver = any(
+        point_id in fixed_body_point_ids and isinstance(constraint, dict) and constraint
+        for point_id, constraint in (point_constraints or {}).items()
+    )
+    if not has_fixed_body_driver:
+        point_constraints.setdefault(str(bb_point.id), {})["x"] = float(bb_point.x)
+    point_constraints.setdefault(str(rear_axle_point.id), {})["y"] = (
+        ground_contact_y - new_rear_radius_px
+    )
+    point_constraints.setdefault(str(front_axle_point.id), {})["y"] = (
+        ground_contact_y - new_front_radius_px
+    )
     solved_points, debug = solve_bike_rest_pose(
         points,
         bodies,
@@ -3503,13 +3558,18 @@ async def compute_bike_kinematics(
             points=points,
             bodies=bodies_for_solver,
         ):
+            variant_point_constraints = _build_variant_point_constraints(
+                variant_target_points,
+                variant_overrides,
+            )
             solved_points, pose_debug = _compute_variant_rest_pose(
-                points=variant_target_points,
+                points=points,
                 bodies=bodies_for_solver,
                 scale_mm_per_px=scale_mm_per_px,
                 base_settings=base_settings,
                 effective_settings=settings,
                 iterations=iterations,
+                override_point_constraints=variant_point_constraints,
             )
             points = solved_points
         else:
