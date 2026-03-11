@@ -545,7 +545,6 @@ def _apply_variant_overrides_to_geometry(
 def _apply_variant_point_overrides_to_points(
     points: List[BikePoint],
     overrides: Optional[dict],
-    bodies: Optional[List[object]] = None,
 ) -> List[BikePoint]:
     if not points:
         return []
@@ -555,78 +554,14 @@ def _apply_variant_point_overrides_to_points(
     if not isinstance(point_overrides, dict):
         return [point.copy(deep=True) for point in points]
 
-    base_by_id = {str(point.id or ""): point for point in points if str(point.id or "")}
-    translated_targets: dict[str, dict[str, float]] = {}
-
-    def _body_type(body: object) -> str:
-        if isinstance(body, dict):
-            return str(body.get("type") or "").strip().lower()
-        return str(getattr(body, "type", "") or "").strip().lower()
-
-    def _body_point_ids(body: object) -> list[str]:
-        if isinstance(body, dict):
-            raw_ids = body.get("point_ids") or []
-        else:
-            raw_ids = getattr(body, "point_ids", None) or []
-        return [str(point_id).strip() for point_id in raw_ids if str(point_id).strip()]
-
-    for body in bodies or []:
-        if _body_type(body) not in {"fixed", "shock"}:
-            continue
-        body_point_ids = _body_point_ids(body)
-        if not body_point_ids:
-            continue
-        overridden_body_ids = [
-            point_id
-            for point_id in body_point_ids
-            if isinstance(point_overrides.get(point_id), dict)
-        ]
-        if not overridden_body_ids:
-            continue
-
-        dx_values: list[float] = []
-        dy_values: list[float] = []
-        for point_id in overridden_body_ids:
-            base_point = base_by_id.get(point_id)
-            override = point_overrides.get(point_id)
-            if base_point is None or not isinstance(override, dict):
-                continue
-            if override.get("x") is not None:
-                dx_values.append(float(override.get("x")) - float(base_point.x))
-            if override.get("y") is not None:
-                dy_values.append(float(override.get("y")) - float(base_point.y))
-
-        if not dx_values and not dy_values:
-            continue
-
-        dx = dx_values[0] if dx_values else 0.0
-        dy = dy_values[0] if dy_values else 0.0
-        if any(abs(value - dx) > 1e-6 for value in dx_values):
-            continue
-        if any(abs(value - dy) > 1e-6 for value in dy_values):
-            continue
-
-        for point_id in body_point_ids:
-            base_point = base_by_id.get(point_id)
-            if base_point is None:
-                continue
-            translated_targets[point_id] = {
-                "x": float(base_point.x) + dx,
-                "y": float(base_point.y) + dy,
-            }
-
     out: List[BikePoint] = []
     for point in points:
         point_id = str(point.id or "")
         override = point_overrides.get(point_id) if point_id else None
-        update: dict[str, float] = {}
-        translated = translated_targets.get(point_id)
-        if isinstance(translated, dict):
-            update["x"] = float(translated.get("x", point.x))
-            update["y"] = float(translated.get("y", point.y))
         if not isinstance(override, dict):
-            out.append(point.copy(update=update) if update else point.copy(deep=True))
+            out.append(point.copy(deep=True))
             continue
+        update: dict[str, float] = {}
         x_value = override.get("x")
         y_value = override.get("y")
         if x_value is not None:
@@ -635,6 +570,35 @@ def _apply_variant_point_overrides_to_points(
             update["y"] = float(y_value)
         out.append(point.copy(update=update) if update else point.copy(deep=True))
     return out
+
+
+def _build_variant_point_constraints(
+    points: List[BikePoint],
+    overrides: Optional[dict],
+) -> dict[str, dict[str, float]]:
+    if not points:
+        return {}
+    if not isinstance(overrides, dict):
+        return {}
+    point_overrides = overrides.get("point_overrides")
+    if not isinstance(point_overrides, dict):
+        return {}
+
+    point_by_id = {str(point.id or ""): point for point in points if str(point.id or "")}
+    constraints: dict[str, dict[str, float]] = {}
+    for point_id, override in point_overrides.items():
+        point_id_str = str(point_id or "").strip()
+        point = point_by_id.get(point_id_str)
+        if not point_id_str or point is None or not isinstance(override, dict):
+            continue
+        constraint: dict[str, float] = {}
+        if override.get("x") is not None:
+            constraint["x"] = float(point.x)
+        if override.get("y") is not None:
+            constraint["y"] = float(point.y)
+        if constraint:
+            constraints[point_id_str] = constraint
+    return constraints
 
 
 def _apply_variant_overrides_to_bodies(
@@ -2240,33 +2204,10 @@ def _variant_requires_rest_pose(
     if not isinstance(point_overrides, dict) or not point_overrides:
         return False
 
-    overridden_point_ids = {
-        str(point_id).strip()
+    return any(
+        str(point_id).strip() and isinstance(payload, dict)
         for point_id, payload in point_overrides.items()
-        if str(point_id).strip() and isinstance(payload, dict)
-    }
-    if not overridden_point_ids:
-        return False
-
-    rest_pose_point_ids: set[str] = set()
-    for point in points or []:
-        point_id = str(getattr(point, "id", "") or "").strip()
-        point_type = str(getattr(point, "type", "") or "").strip().lower()
-        if not point_id:
-            continue
-        if point_type in {"bb", "bottom_bracket", "front_axle", "rear_axle", "fixed"}:
-            rest_pose_point_ids.add(point_id)
-
-    for body in bodies or []:
-        body_type = str(getattr(body, "type", "") or "").strip().lower()
-        if body_type not in {"fixed", "shock"}:
-            continue
-        for point_id in getattr(body, "point_ids", None) or []:
-            point_id_str = str(point_id or "").strip()
-            if point_id_str:
-                rest_pose_point_ids.add(point_id_str)
-
-    return bool(overridden_point_ids & rest_pose_point_ids)
+    )
 
 
 def _serialize_solver_step(step: SolverStep) -> dict[str, object]:
@@ -2304,6 +2245,7 @@ def _compute_variant_rest_pose(
     base_settings: dict,
     effective_settings: dict,
     iterations: int,
+    override_point_constraints: Optional[dict[str, dict[str, float]]] = None,
 ) -> tuple[List[BikePoint], dict]:
     if not (scale_mm_per_px > 0):
         return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
@@ -2331,10 +2273,21 @@ def _compute_variant_rest_pose(
     ground_contact_y = rear_contact_y
 
     point_constraints = {
-        str(bb_point.id): {"x": float(bb_point.x)},
-        str(rear_axle_point.id): {"y": ground_contact_y - new_rear_radius_px},
-        str(front_axle_point.id): {"y": ground_contact_y - new_front_radius_px},
+        str(point_id): {
+            key: float(value)
+            for key, value in constraint.items()
+            if key in {"x", "y"} and value is not None
+        }
+        for point_id, constraint in (override_point_constraints or {}).items()
+        if isinstance(constraint, dict)
     }
+    point_constraints.setdefault(str(bb_point.id), {})["x"] = float(bb_point.x)
+    point_constraints.setdefault(str(rear_axle_point.id), {})["y"] = (
+        ground_contact_y - new_rear_radius_px
+    )
+    point_constraints.setdefault(str(front_axle_point.id), {})["y"] = (
+        ground_contact_y - new_front_radius_px
+    )
     solved_points, debug = solve_bike_rest_pose(
         points,
         bodies,
@@ -3398,11 +3351,7 @@ async def compute_bike_kinematics(
             )
     if not points:
         raise HTTPException(status_code=400, detail="Bike has no valid points defined")
-    points = _apply_variant_point_overrides_to_points(
-        points,
-        variant_overrides,
-        bodies=doc.get("bodies") or [],
-    )
+    variant_target_points = _apply_variant_point_overrides_to_points(points, variant_overrides)
 
     settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
     base_settings = settings_doc.get("settings") if settings_doc else {}
@@ -3459,20 +3408,26 @@ async def compute_bike_kinematics(
     ty = None
     if H is not None:
         rectified_points: List[BikePoint] = []
+        rectified_variant_target_points: List[BikePoint] = []
         scale = rectify.get("scale") if isinstance(rectify, dict) else None
         tx = rectify.get("tx") if isinstance(rectify, dict) else None
         ty = rectify.get("ty") if isinstance(rectify, dict) else None
-        for p in points:
-            mapped = apply_homography(H, p.x, p.y)
-            if not mapped:
-                rectified_points.append(p)
-                continue
-            x, y = mapped
-            if scale and tx is not None and ty is not None:
-                x = x * scale + tx
-                y = y * scale + ty
-            rectified_points.append(p.copy(update={"x": x, "y": y}))
+        for source_points, target_points in (
+            (points, rectified_points),
+            (variant_target_points, rectified_variant_target_points),
+        ):
+            for p in source_points:
+                mapped = apply_homography(H, p.x, p.y)
+                if not mapped:
+                    target_points.append(p)
+                    continue
+                x, y = mapped
+                if scale and tx is not None and ty is not None:
+                    x = x * scale + tx
+                    y = y * scale + ty
+                target_points.append(p.copy(update={"x": x, "y": y}))
         points = rectified_points
+        variant_target_points = rectified_variant_target_points
         homography_applied = True
 
     # ---- Extract / validate bodies ----
@@ -3546,6 +3501,10 @@ async def compute_bike_kinematics(
             points=points,
             bodies=bodies_for_solver,
         ):
+            variant_point_constraints = _build_variant_point_constraints(
+                variant_target_points,
+                variant_overrides,
+            )
             solved_points, pose_debug = _compute_variant_rest_pose(
                 points=points,
                 bodies=bodies_for_solver,
@@ -3553,9 +3512,11 @@ async def compute_bike_kinematics(
                 base_settings=base_settings,
                 effective_settings=settings,
                 iterations=iterations,
+                override_point_constraints=variant_point_constraints,
             )
             points = solved_points
         else:
+            points = variant_target_points
             pose_debug = {"mode": "rest_pose", "applied": False, "reason": "no_pose_override"}
     else:
         pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
