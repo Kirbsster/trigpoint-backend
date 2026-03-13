@@ -323,10 +323,18 @@ def _solve_with_edges(
                 state_x[ib] -= dx * diff * half
                 state_y[ib] -= dy * diff * half
 
-    def _solve_state_to_stroke(state_x: List[float], state_y: List[float], s: float) -> None:
+    def _solve_state_to_stroke(
+        state_x: List[float],
+        state_y: List[float],
+        s: float,
+        *,
+        iterations_override: Optional[int] = None,
+        final_projection_passes: int = 3,
+    ) -> None:
         target_shock_len = driver_L0 - s  # shorten shock with positive stroke
 
-        for _ in range(iterations):
+        solve_iterations = max(1, int(iterations_override or iterations))
+        for _ in range(solve_iterations):
             _project_distance_constraints(state_x, state_y, target_shock_len)
 
             # Rigid body shape matching (prevents collinear "bending")
@@ -374,7 +382,7 @@ def _solve_with_edges(
 
         # Final length projection after the last rigid-group solve keeps the
         # recorded pose on the target shock eye-to-eye length.
-        for _ in range(3):
+        for _ in range(max(1, int(final_projection_passes))):
             _project_distance_constraints(state_x, state_y, target_shock_len)
             _apply_axis_constraints(state_x, state_y)
 
@@ -421,26 +429,41 @@ def _solve_with_edges(
     n_steps = max(1, n_steps)
     iterations = max(1, iterations)
 
+    state_x = x0.copy()
+    state_y = y0.copy()
+    _apply_axis_constraints(state_x, state_y)
+
+    total_steps = n_steps + max(0, pre_steps)
     step_stroke = driver_stroke / n_steps
     pre_roll_len = step_stroke * max(0, pre_steps)
 
-    pos_x = x0.copy()
-    pos_y = y0.copy()
-    _apply_axis_constraints(pos_x, pos_y)
-    zero_step = _build_step_from_state(
-        pos_x,
-        pos_y,
-        step_index=0,
-        shock_stroke=0.0,
-    )
-    steps.append(zero_step)
-    previous_step = zero_step
-    for step_i in range(1, n_steps + 1):
-        s = driver_stroke * (step_i / n_steps)
-        _solve_state_to_stroke(pos_x, pos_y, s)
+    previous_step: Optional[SolverStep] = None
+    for step_i in range(total_steps + 1):
+        if pre_steps > 0 and step_i < pre_steps:
+            s = -pre_roll_len * ((pre_steps - step_i) / pre_steps)
+        else:
+            s = driver_stroke * ((step_i - pre_steps) / n_steps)
+
+        extra_iters = 0
+        final_passes = 3
+        if pre_steps > 0:
+            if step_i < pre_steps:
+                extra_iters = max(12, iterations // 2)
+                final_passes = 5
+            elif step_i <= pre_steps + 2:
+                extra_iters = max(16, iterations)
+                final_passes = 6
+
+        _solve_state_to_stroke(
+            state_x,
+            state_y,
+            s,
+            iterations_override=iterations + extra_iters,
+            final_projection_passes=final_passes,
+        )
         step = _build_step_from_state(
-            pos_x,
-            pos_y,
+            state_x,
+            state_y,
             step_index=step_i,
             shock_stroke=s,
             previous_step=previous_step,
@@ -449,37 +472,13 @@ def _solve_with_edges(
         previous_step = step
 
     full_steps = steps
-    if pre_steps > 0:
-        neg_x = x0.copy()
-        neg_y = y0.copy()
-        _apply_axis_constraints(neg_x, neg_y)
-        neg_steps_return: List[SolverStep] = []
-        neg_previous = None
-
-        # Pre-roll by extending to the most negative stroke first, then walk
-        # back toward zero. This keeps the samples nearest L0 warm-started and
-        # restores the smoother endpoint gradient behaviour.
-        if pre_roll_len > 0:
-            _solve_state_to_stroke(neg_x, neg_y, -pre_roll_len)
-
-        for step_i in range(pre_steps, 0, -1):
-            s = -(step_stroke * step_i)
-            if step_i != pre_steps:
-                _solve_state_to_stroke(neg_x, neg_y, s)
-            step = _build_step_from_state(
-                neg_x,
-                neg_y,
-                step_index=(pre_steps - step_i),
-                shock_stroke=s,
-                previous_step=neg_previous,
+    if pre_steps > 0 and len(steps) > pre_steps:
+        trimmed: List[SolverStep] = []
+        for s in steps[pre_steps:]:
+            trimmed.append(
+                s.copy(update={"step_index": s.step_index - pre_steps})
             )
-            neg_steps_return.append(step)
-            neg_previous = step
-
-        full_steps = []
-        ordered_full = neg_steps_return + steps
-        for step_index, step in enumerate(ordered_full):
-            full_steps.append(step.copy(update={"step_index": step_index}))
+        steps = trimmed
 
     rear_axle_id = points[rear_axle_idx].id if rear_axle_idx is not None else None
 
