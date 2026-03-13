@@ -3551,32 +3551,16 @@ async def compute_bike_kinematics(
             steps=steps,
             iterations=iterations,
         )
-        if _variant_requires_rest_pose(
-            base_settings,
-            settings,
-            overrides=variant_overrides,
-            points=points,
-            bodies=bodies_for_solver,
-        ):
-            variant_point_constraints = _build_variant_point_constraints(
-                variant_target_points,
-                variant_overrides,
-            )
-            solved_points, pose_debug = _compute_variant_rest_pose(
-                points=points,
-                bodies=bodies_for_solver,
-                scale_mm_per_px=scale_mm_per_px,
-                base_settings=base_settings,
-                effective_settings=settings,
-                iterations=iterations,
-                override_point_constraints=variant_point_constraints,
-            )
-            points = solved_points
-        else:
-            points = variant_target_points
-            pose_debug = {"mode": "rest_pose", "applied": False, "reason": "no_pose_override"}
+        # Temporary: disable variant rest-pose solving so authored points stay in
+        # the same frame as the hero image until variant/state handling is
+        # redesigned.
+        points = variant_target_points
+        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "disabled"}
     else:
         pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
+
+    zero_pose_points = {point.id: (float(point.x), float(point.y)) for point in points}
+    zero_shock_length_mm = _shock_length_mm_for_points(points, bodies_for_solver, scale_mm_per_px)
 
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver_px: List[RigidBody] = []
@@ -3636,24 +3620,30 @@ async def compute_bike_kinematics(
     if full_steps:
         result.full_steps = full_steps
 
-    if variant_doc is not None and pose_debug.get("applied") and solver_steps:
-        solved_zero_points = {point.id: (float(point.x), float(point.y)) for point in points}
-        shock_length_zero_mm = _shock_length_mm_for_points(points, bodies_for_solver, scale_mm_per_px)
-        solver_steps[0].points = solved_zero_points
-        solver_steps[0].shock_stroke = 0.0
-        solver_steps[0].rear_travel = 0.0
-        solver_steps[0].leverage_ratio = None
-        if shock_length_zero_mm is not None:
-            solver_steps[0].shock_length = shock_length_zero_mm
-        if full_steps:
-            zero_index = next((idx for idx, step in enumerate(full_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9), None)
-            if zero_index is not None:
-                full_steps[zero_index].points = solved_zero_points
-                full_steps[zero_index].shock_stroke = 0.0
-                full_steps[zero_index].rear_travel = 0.0
-                full_steps[zero_index].leverage_ratio = None
-                if shock_length_zero_mm is not None:
-                    full_steps[zero_index].shock_length = shock_length_zero_mm
+    # Keep the returned zero-stroke/L0 pose pinned to the authored input points.
+    if solver_steps:
+        zero_index = next(
+            (idx for idx, step in enumerate(solver_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9),
+            0,
+        )
+        solver_steps[zero_index].points = zero_pose_points
+        solver_steps[zero_index].shock_stroke = 0.0
+        solver_steps[zero_index].rear_travel = 0.0
+        solver_steps[zero_index].leverage_ratio = None
+        if zero_shock_length_mm is not None:
+            solver_steps[zero_index].shock_length = zero_shock_length_mm
+    if full_steps:
+        zero_index_full = next(
+            (idx for idx, step in enumerate(full_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9),
+            None,
+        )
+        if zero_index_full is not None:
+            full_steps[zero_index_full].points = zero_pose_points
+            full_steps[zero_index_full].shock_stroke = 0.0
+            full_steps[zero_index_full].rear_travel = 0.0
+            full_steps[zero_index_full].leverage_ratio = None
+            if zero_shock_length_mm is not None:
+                full_steps[zero_index_full].shock_length = zero_shock_length_mm
 
     rectify_scale = None
     if isinstance(rectify, dict) and rectify.get("scale") is not None:
@@ -4104,18 +4094,11 @@ async def compute_bike_kinematics(
             },
         )
     elif is_owner and variant_doc is not None:
-        pose_cache = {
-            "point_coords": {
-                point.id: {"x": float(point.x), "y": float(point.y)}
-                for point in points
-            },
-            "debug": pose_debug,
-        }
         await bike_variants_col().update_one(
             {"_id": variant_doc["_id"], "bike_id": oid},
             {
                 "$set": {
-                    "pose_cache": pose_cache,
+                    "pose_cache": None,
                     "kinematics_cache": kin_doc,
                     "cache_fingerprint": variant_fingerprint,
                     "status": "ready",
