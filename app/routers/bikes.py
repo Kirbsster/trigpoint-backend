@@ -3571,7 +3571,7 @@ async def compute_bike_kinematics(
             bodies_for_solver_px.append(b)
 
     # ---- Run solver (all geometry in px) ----
-    pre_steps = 5
+    pre_steps = 3
     if variant_doc is not None and pose_debug.get("applied"):
         pre_steps = 0
 
@@ -3820,7 +3820,8 @@ async def compute_bike_kinematics(
                         rear_axle_relative_mm_full.append([dx, dy])
                     shock_stroke_mm_full.append(step.shock_stroke)
 
-        # Compute leverage ratio with a smooth numerical gradient
+        # Compute leverage ratio with one consistent numerical derivative across
+        # the full pre-roll + travel series.
         if source_steps:
             travel_series = [
                 (float(s.rear_travel) if s.rear_travel is not None else np.nan)
@@ -3840,7 +3841,6 @@ async def compute_bike_kinematics(
                     grad = grad_full[trim_index:]
                 else:
                     grad = grad_full
-                # Trim to series length if needed.
                 if len(grad) > len(shock_stroke_mm_series):
                     grad = grad[: len(shock_stroke_mm_series)]
                 leverage_ratio_series = [
