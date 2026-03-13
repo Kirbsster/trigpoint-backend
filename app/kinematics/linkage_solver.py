@@ -453,23 +453,31 @@ def _solve_with_edges(
         neg_x = x0.copy()
         neg_y = y0.copy()
         _apply_axis_constraints(neg_x, neg_y)
-        neg_steps_outward: List[SolverStep] = []
-        neg_previous = zero_step
-        for step_i in range(1, pre_steps + 1):
+        neg_steps_return: List[SolverStep] = []
+        neg_previous = None
+
+        # Pre-roll by extending to the most negative stroke first, then walk
+        # back toward zero. This keeps the samples nearest L0 warm-started and
+        # restores the smoother endpoint gradient behaviour.
+        if pre_roll_len > 0:
+            _solve_state_to_stroke(neg_x, neg_y, -pre_roll_len)
+
+        for step_i in range(pre_steps, 0, -1):
             s = -(step_stroke * step_i)
-            _solve_state_to_stroke(neg_x, neg_y, s)
+            if step_i != pre_steps:
+                _solve_state_to_stroke(neg_x, neg_y, s)
             step = _build_step_from_state(
                 neg_x,
                 neg_y,
-                step_index=step_i,
+                step_index=(pre_steps - step_i),
                 shock_stroke=s,
                 previous_step=neg_previous,
             )
-            neg_steps_outward.append(step)
+            neg_steps_return.append(step)
             neg_previous = step
 
         full_steps = []
-        ordered_full = list(reversed(neg_steps_outward)) + steps
+        ordered_full = neg_steps_return + steps
         for step_index, step in enumerate(ordered_full):
             full_steps.append(step.copy(update={"step_index": step_index}))
 
