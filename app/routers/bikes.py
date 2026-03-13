@@ -3559,9 +3559,6 @@ async def compute_bike_kinematics(
     else:
         pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
 
-    zero_pose_points = {point.id: (float(point.x), float(point.y)) for point in points}
-    zero_shock_length_mm = _shock_length_mm_for_points(points, bodies_for_solver, scale_mm_per_px)
-
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver_px: List[RigidBody] = []
     for b in bodies_for_solver:
@@ -3619,31 +3616,6 @@ async def compute_bike_kinematics(
                 s.rear_travel = s.rear_travel * scale_mm
     if full_steps:
         result.full_steps = full_steps
-
-    # Keep the returned zero-stroke/L0 pose pinned to the authored input points.
-    if solver_steps:
-        zero_index = next(
-            (idx for idx, step in enumerate(solver_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9),
-            0,
-        )
-        solver_steps[zero_index].points = zero_pose_points
-        solver_steps[zero_index].shock_stroke = 0.0
-        solver_steps[zero_index].rear_travel = 0.0
-        solver_steps[zero_index].leverage_ratio = None
-        if zero_shock_length_mm is not None:
-            solver_steps[zero_index].shock_length = zero_shock_length_mm
-    if full_steps:
-        zero_index_full = next(
-            (idx for idx, step in enumerate(full_steps) if abs(float(step.shock_stroke or 0.0)) <= 1e-9),
-            None,
-        )
-        if zero_index_full is not None:
-            full_steps[zero_index_full].points = zero_pose_points
-            full_steps[zero_index_full].shock_stroke = 0.0
-            full_steps[zero_index_full].rear_travel = 0.0
-            full_steps[zero_index_full].leverage_ratio = None
-            if zero_shock_length_mm is not None:
-                full_steps[zero_index_full].shock_length = zero_shock_length_mm
 
     rectify_scale = None
     if isinstance(rectify, dict) and rectify.get("scale") is not None:

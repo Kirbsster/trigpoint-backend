@@ -271,23 +271,27 @@ def _solve_with_edges(
     - For the driver shock edge, target length = L0 - shock_stroke.
     """
     n = len(points)
-    x = [p.x for p in points]
-    y = [p.y for p in points]
+    x0 = [p.x for p in points]
+    y0 = [p.y for p in points]
 
-    def _apply_axis_constraints() -> None:
+    def _apply_axis_constraints(state_x: List[float], state_y: List[float]) -> None:
         if not axis_constraints:
             return
         for idx, constraint in axis_constraints.items():
-            if idx < 0 or idx >= len(x):
+            if idx < 0 or idx >= len(state_x):
                 continue
             target_x = constraint.get("x")
             target_y = constraint.get("y")
             if target_x is not None:
-                x[idx] = float(target_x)
+                state_x[idx] = float(target_x)
             if target_y is not None:
-                y[idx] = float(target_y)
+                state_y[idx] = float(target_y)
 
-    def _project_distance_constraints(target_shock_len: float) -> None:
+    def _project_distance_constraints(
+        state_x: List[float],
+        state_y: List[float],
+        target_shock_len: float,
+    ) -> None:
         for ei, edge in enumerate(edges):
             ia, ib = edge.ia, edge.ib
 
@@ -296,8 +300,8 @@ def _solve_with_edges(
             else:
                 target_L = edge.L0
 
-            dx = x[ib] - x[ia]
-            dy = y[ib] - y[ia]
+            dx = state_x[ib] - state_x[ia]
+            dy = state_y[ib] - state_y[ia]
             dist = math.hypot(dx, dy) or 1e-9
             diff = (dist - target_L) / dist
 
@@ -307,46 +311,23 @@ def _solve_with_edges(
             if fa and fb:
                 continue
             elif fa and not fb:
-                x[ib] -= dx * diff
-                y[ib] -= dy * diff
+                state_x[ib] -= dx * diff
+                state_y[ib] -= dy * diff
             elif fb and not fa:
-                x[ia] += dx * diff
-                y[ia] += dy * diff
+                state_x[ia] += dx * diff
+                state_y[ia] += dy * diff
             else:
                 half = 0.5
-                x[ia] += dx * diff * half
-                y[ia] += dy * diff * half
-                x[ib] -= dx * diff * half
-                y[ib] -= dy * diff * half
+                state_x[ia] += dx * diff * half
+                state_y[ia] += dy * diff * half
+                state_x[ib] -= dx * diff * half
+                state_y[ib] -= dy * diff * half
 
-    # Rear axle initial vertical position
-    rear_y0 = y[rear_axle_idx] if rear_axle_idx is not None else None
-
-    steps: List[SolverStep] = []
-    n_steps = max(1, n_steps)
-    iterations = max(1, iterations)
-
-    total_steps = n_steps + max(0, pre_steps)
-    # Negative extension length based on pre-roll steps.
-    pre_roll_len = 0.0
-    if pre_steps > 0:
-        step_stroke = driver_stroke / n_steps
-        pre_roll_len = step_stroke * pre_steps
-
-    _apply_axis_constraints()
-
-    for step_i in range(total_steps + 1):
-        # Shock stroke used at this step (negative → extension, if pre_steps > 0)
-        if pre_steps > 0 and step_i < pre_steps:
-            # Linearly extend up to pre_roll_len before zero travel.
-            s = -pre_roll_len * ((pre_steps - step_i) / pre_steps)
-        else:
-            s = driver_stroke * ((step_i - pre_steps) / n_steps)
+    def _solve_state_to_stroke(state_x: List[float], state_y: List[float], s: float) -> None:
         target_shock_len = driver_L0 - s  # shorten shock with positive stroke
 
-        # Iterative constraint projection
         for _ in range(iterations):
-            _project_distance_constraints(target_shock_len)
+            _project_distance_constraints(state_x, state_y, target_shock_len)
 
             # Rigid body shape matching (prevents collinear "bending")
             for group in rigid_groups or []:
@@ -360,16 +341,16 @@ def _solve_with_edges(
                 rest_cx = group["rest_cx"]
                 rest_cy = group["rest_cy"]
 
-                cur_cx = sum(x[i] for i in indices) / len(indices)
-                cur_cy = sum(y[i] for i in indices) / len(indices)
+                cur_cx = sum(state_x[i] for i in indices) / len(indices)
+                cur_cy = sum(state_y[i] for i in indices) / len(indices)
 
                 a = 0.0
                 b = 0.0
                 for (rx, ry), i in zip(rest, indices):
                     qx = rx - rest_cx
                     qy = ry - rest_cy
-                    px = x[i] - cur_cx
-                    py = y[i] - cur_cy
+                    px = state_x[i] - cur_cx
+                    py = state_y[i] - cur_cy
                     a += px * qx + py * qy
                     b += py * qx - px * qy
 
@@ -386,60 +367,111 @@ def _solve_with_edges(
                     qy = ry - rest_cy
                     tx = cos_t * qx - sin_t * qy
                     ty = sin_t * qx + cos_t * qy
-                    x[i] = cur_cx + tx
-                    y[i] = cur_cy + ty
+                    state_x[i] = cur_cx + tx
+                    state_y[i] = cur_cy + ty
 
-            _apply_axis_constraints()
+            _apply_axis_constraints(state_x, state_y)
 
         # Final length projection after the last rigid-group solve keeps the
-        # recorded zero-travel pose on the target shock eye-to-eye length.
+        # recorded pose on the target shock eye-to-eye length.
         for _ in range(3):
-            _project_distance_constraints(target_shock_len)
-            _apply_axis_constraints()
+            _project_distance_constraints(state_x, state_y, target_shock_len)
+            _apply_axis_constraints(state_x, state_y)
 
-        # --- Record this step ---
-        # Rear axle travel (vertical, positive "up" from initial)
+    def _build_step_from_state(
+        state_x: List[float],
+        state_y: List[float],
+        *,
+        step_index: int,
+        shock_stroke: float,
+        previous_step: Optional[SolverStep] = None,
+    ) -> SolverStep:
         rear_travel: Optional[float] = None
         if rear_axle_idx is not None and rear_y0 is not None:
-            rear_travel = rear_y0 - y[rear_axle_idx]
+            rear_travel = rear_y0 - state_y[rear_axle_idx]
 
-        # Actual shock length after solve
         driver_edge = edges[driver_edge_idx]
         ia, ib = driver_edge.ia, driver_edge.ib
-        dx = x[ib] - x[ia]
-        dy = y[ib] - y[ia]
+        dx = state_x[ib] - state_x[ia]
+        dy = state_y[ib] - state_y[ia]
         shock_len = math.hypot(dx, dy)
 
-        # Point positions
-        positions = {p.id: (x[i], y[i]) for i, p in enumerate(points)}
+        positions = {p.id: (state_x[i], state_y[i]) for i, p in enumerate(points)}
 
-        # Leverage via finite difference
         leverage: Optional[float] = None
-        if step_i > 0 and rear_travel is not None and steps[-1].rear_travel is not None:
-            ds = s - steps[-1].shock_stroke
+        if previous_step is not None and rear_travel is not None and previous_step.rear_travel is not None:
+            ds = shock_stroke - previous_step.shock_stroke
             if abs(ds) > 1e-9:
-                dr = rear_travel - steps[-1].rear_travel
+                dr = rear_travel - previous_step.rear_travel
                 leverage = dr / ds
 
-        steps.append(
-            SolverStep(
-                step_index=step_i,
-                shock_stroke=s,
-                shock_length=shock_len,
-                rear_travel=rear_travel,
-                leverage_ratio=leverage,
-                points=positions,
-            )
+        return SolverStep(
+            step_index=step_index,
+            shock_stroke=shock_stroke,
+            shock_length=shock_len,
+            rear_travel=rear_travel,
+            leverage_ratio=leverage,
+            points=positions,
         )
 
+    # Rear axle initial vertical position
+    rear_y0 = y0[rear_axle_idx] if rear_axle_idx is not None else None
+
+    steps: List[SolverStep] = []
+    n_steps = max(1, n_steps)
+    iterations = max(1, iterations)
+
+    step_stroke = driver_stroke / n_steps
+    pre_roll_len = step_stroke * max(0, pre_steps)
+
+    pos_x = x0.copy()
+    pos_y = y0.copy()
+    _apply_axis_constraints(pos_x, pos_y)
+    zero_step = _build_step_from_state(
+        pos_x,
+        pos_y,
+        step_index=0,
+        shock_stroke=0.0,
+    )
+    steps.append(zero_step)
+    previous_step = zero_step
+    for step_i in range(1, n_steps + 1):
+        s = driver_stroke * (step_i / n_steps)
+        _solve_state_to_stroke(pos_x, pos_y, s)
+        step = _build_step_from_state(
+            pos_x,
+            pos_y,
+            step_index=step_i,
+            shock_stroke=s,
+            previous_step=previous_step,
+        )
+        steps.append(step)
+        previous_step = step
+
     full_steps = steps
-    if pre_steps > 0 and len(steps) > pre_steps:
-        trimmed: List[SolverStep] = []
-        for s in steps[pre_steps:]:
-            trimmed.append(
-                s.copy(update={"step_index": s.step_index - pre_steps})
+    if pre_steps > 0:
+        neg_x = x0.copy()
+        neg_y = y0.copy()
+        _apply_axis_constraints(neg_x, neg_y)
+        neg_steps_outward: List[SolverStep] = []
+        neg_previous = zero_step
+        for step_i in range(1, pre_steps + 1):
+            s = -(step_stroke * step_i)
+            _solve_state_to_stroke(neg_x, neg_y, s)
+            step = _build_step_from_state(
+                neg_x,
+                neg_y,
+                step_index=step_i,
+                shock_stroke=s,
+                previous_step=neg_previous,
             )
-        steps = trimmed
+            neg_steps_outward.append(step)
+            neg_previous = step
+
+        full_steps = []
+        ordered_full = list(reversed(neg_steps_outward)) + steps
+        for step_index, step in enumerate(ordered_full):
+            full_steps.append(step.copy(update={"step_index": step_index}))
 
     rear_axle_id = points[rear_axle_idx].id if rear_axle_idx is not None else None
 
