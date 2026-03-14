@@ -444,15 +444,8 @@ def _solve_with_edges(
         else:
             s = driver_stroke * ((step_i - pre_steps) / n_steps)
 
-        extra_iters = 0
-        final_passes = 3
-        if pre_steps > 0:
-            if step_i < pre_steps:
-                extra_iters = max(12, iterations // 2)
-                final_passes = 5
-            elif step_i <= pre_steps + 2:
-                extra_iters = max(16, iterations)
-                final_passes = 6
+        extra_iters = max(16, iterations)
+        final_passes = 6
 
         _solve_state_to_stroke(
             state_x,
