@@ -142,6 +142,7 @@ class ShockModel(BaseModel):
     coil_rate_n_per_mm: float = 70.0
     coil_preload_n: float = 0.0
     air_chamber_diameter_mm: float = 42.0
+    eyelet_gap_mm: float = 42.0
     air_chamber_length_mm: float = 95.0
     air_negative_chamber_length_mm: float = 35.0
     air_piston_head_thickness_mm: float = 5.0

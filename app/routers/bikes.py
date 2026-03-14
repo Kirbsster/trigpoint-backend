@@ -2040,6 +2040,7 @@ _CHAIN_PITCH_MM = 12.7
 _PSI_TO_PA = 6894.757293168
 _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "air_chamber_diameter_mm": 50.8,
+    "eyelet_gap_mm": 50.8,
     "air_chamber_length_mm": 70,
     "air_negative_chamber_length_mm": 20.0,
     "air_piston_head_thickness_mm": 5.0,
@@ -2062,6 +2063,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 10,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
+            "eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2084,6 +2086,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 20,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
+            "eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2106,6 +2109,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 30,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
+            "eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2167,11 +2171,16 @@ def _shock_preset_doc_to_out(doc: dict) -> ShockPresetOut:
         shock_type = "air"
     model_raw = doc.get("shock_model")
     model = dict(_DEFAULT_SHOCK_MODEL)
+    eyelet_gap_value = None
     if isinstance(model_raw, dict):
         for key in model.keys():
             value = _parse_optional_finite(model_raw.get(key))
             if value is not None:
                 model[key] = value
+            if key == "eyelet_gap_mm":
+                eyelet_gap_value = value
+    if eyelet_gap_value is None or eyelet_gap_value <= 0:
+        model["eyelet_gap_mm"] = model["air_chamber_diameter_mm"]
     return ShockPresetOut(
         id=str(doc.get("_id")),
         preset_id=str(doc.get("preset_id") or ""),
@@ -2460,17 +2469,22 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
 
     raw_model = geom.get("shock_model")
     model: dict[str, float] = dict(_DEFAULT_SHOCK_MODEL)
+    eyelet_gap_value = None
     if isinstance(raw_model, dict):
         for key, default_value in _DEFAULT_SHOCK_MODEL.items():
             value = _parse_optional_finite(raw_model.get(key))
             if value is None:
                 continue
             model[key] = value
+            if key == "eyelet_gap_mm":
+                eyelet_gap_value = value
 
     if model["coil_rate_n_per_mm"] <= 0:
         model["coil_rate_n_per_mm"] = _DEFAULT_SHOCK_MODEL["coil_rate_n_per_mm"]
     if model["air_chamber_diameter_mm"] <= 0:
         model["air_chamber_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"]
+    if eyelet_gap_value is None or model["eyelet_gap_mm"] <= 0:
+        model["eyelet_gap_mm"] = model["air_chamber_diameter_mm"]
     if model["air_chamber_length_mm"] <= 0:
         model["air_chamber_length_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"]
     if model["air_negative_chamber_length_mm"] <= 0:
