@@ -3571,7 +3571,7 @@ async def compute_bike_kinematics(
             bodies_for_solver_px.append(b)
 
     # ---- Run solver (all geometry in px) ----
-    pre_steps = 3
+    pre_steps = 10
     if variant_doc is not None and pose_debug.get("applied"):
         pre_steps = 0
 
