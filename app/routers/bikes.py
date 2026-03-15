@@ -2061,10 +2061,6 @@ _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
         "outer_diameter_mm": 19.9,
         "bore_diameter_mm": 12.7,
     },
-    "body_end": {
-        "length_mm": 0.0,
-        "diameter_mm": 50.8,
-    },
     "body_end_solid": {
         "length_mm": 0.0,
         "diameter_mm": 50.8,
@@ -2255,7 +2251,6 @@ def _default_shock_visual_model_for_model(model: dict[str, object]) -> dict[str,
         "outer_diameter_mm": eye_outer,
         "bore_diameter_mm": 12.7,
     }
-    visual["body_end"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
     visual["body_end_solid"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
     visual["body_end_positive_chamber"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
     visual["swept_air_chamber"] = {"length_mm": swept_len, "diameter_mm": chamber_d}
@@ -2318,7 +2313,6 @@ def _normalize_shock_visual_model(raw_visual, model: dict[str, object]) -> dict[
         float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
     )
     _eyelet("body_eyelet")
-    _pair("body_end", chamber_d)
     _pair("body_end_solid", chamber_d)
     _pair("body_end_positive_chamber", chamber_d)
     _pair("swept_air_chamber", chamber_d)
