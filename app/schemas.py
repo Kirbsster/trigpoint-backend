@@ -142,7 +142,8 @@ class ShockModel(BaseModel):
     coil_rate_n_per_mm: float = 70.0
     coil_preload_n: float = 0.0
     air_chamber_diameter_mm: float = 42.0
-    eyelet_gap_mm: float = 42.0
+    body_eyelet_gap_mm: float = 42.0
+    shaft_eyelet_gap_mm: float = 42.0
     air_chamber_length_mm: float = 95.0
     air_negative_chamber_length_mm: float = 35.0
     air_piston_head_thickness_mm: float = 5.0
@@ -152,6 +153,7 @@ class ShockModel(BaseModel):
     air_reference_temp_c: float = 20.0
     air_cold_temp_c: float = 5.0
     air_hot_temp_c: float = 45.0
+    visual_model: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ShockPresetOut(BaseModel):

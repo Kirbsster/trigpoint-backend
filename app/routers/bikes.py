@@ -2040,7 +2040,8 @@ _CHAIN_PITCH_MM = 12.7
 _PSI_TO_PA = 6894.757293168
 _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "air_chamber_diameter_mm": 50.8,
-    "eyelet_gap_mm": 50.8,
+    "body_eyelet_gap_mm": 50.8,
+    "shaft_eyelet_gap_mm": 50.8,
     "air_chamber_length_mm": 70,
     "air_negative_chamber_length_mm": 20.0,
     "air_piston_head_thickness_mm": 5.0,
@@ -2053,6 +2054,53 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "coil_rate_n_per_mm": 70.0,
     "coil_preload_n": 0.0,
 }
+_DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
+    "body_end_gap_mm": 50.8,
+    "shaft_end_gap_mm": 50.8,
+    "body_eyelet": {
+        "outer_diameter_mm": 19.9,
+        "bore_diameter_mm": 12.7,
+    },
+    "body_end": {
+        "length_mm": 0.0,
+        "diameter_mm": 50.8,
+    },
+    "body_end_solid": {
+        "length_mm": 0.0,
+        "diameter_mm": 50.8,
+    },
+    "body_end_positive_chamber": {
+        "length_mm": 0.0,
+        "diameter_mm": 50.8,
+    },
+    "swept_air_chamber": {
+        "length_mm": 70.0,
+        "diameter_mm": 50.8,
+    },
+    "negative_chamber_extension": {
+        "length_mm": 20.0,
+        "diameter_mm": 50.8,
+    },
+    "negative_annular_chamber": {
+        "length_mm": 0.0,
+        "inner_diameter_mm": 50.8,
+        "outer_diameter_mm": 50.8,
+    },
+    "damper_shaft": {
+        "diameter_mm": 25.4,
+    },
+    "positive_chamber_shaft": {
+        "diameter_mm": 8.0,
+    },
+    "piston": {
+        "diameter_mm": 50.8,
+        "thickness_mm": 5.0,
+    },
+    "shaft_eyelet": {
+        "outer_diameter_mm": 19.9,
+        "bore_diameter_mm": 12.7,
+    },
+}
 _DEFAULT_SHOCK_PRESETS: list[dict] = [
     {
         "preset_id": "default_xc_air",
@@ -2063,7 +2111,8 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 10,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
-            "eyelet_gap_mm": 50.8,
+            "body_eyelet_gap_mm": 50.8,
+            "shaft_eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2075,6 +2124,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_hot_temp_c": 45.0,
             "coil_rate_n_per_mm": 70.0,
             "coil_preload_n": 0.0,
+            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
         },
     },
     {
@@ -2086,7 +2136,8 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 20,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
-            "eyelet_gap_mm": 50.8,
+            "body_eyelet_gap_mm": 50.8,
+            "shaft_eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2098,6 +2149,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_hot_temp_c": 45.0,
             "coil_rate_n_per_mm": 70.0,
             "coil_preload_n": 0.0,
+            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
         },
     },
     {
@@ -2109,7 +2161,8 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "sort_order": 30,
         "shock_model": {
             "air_chamber_diameter_mm": 50.8,
-            "eyelet_gap_mm": 50.8,
+            "body_eyelet_gap_mm": 50.8,
+            "shaft_eyelet_gap_mm": 50.8,
             "air_chamber_length_mm": 70,
             "air_negative_chamber_length_mm": 20.0,
             "air_piston_head_thickness_mm": 5.0,
@@ -2121,6 +2174,7 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
             "air_hot_temp_c": 45.0,
             "coil_rate_n_per_mm": 70.0,
             "coil_preload_n": 0.0,
+            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
         },
     },
 ]
@@ -2136,6 +2190,205 @@ def _parse_optional_finite(value) -> Optional[float]:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+def _copy_shock_visual_model_defaults() -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in _DEFAULT_SHOCK_VISUAL_MODEL.items():
+        out[key] = dict(value) if isinstance(value, dict) else float(value)
+    return out
+
+
+def _default_shock_visual_model_for_model(model: dict[str, object]) -> dict[str, object]:
+    visual = _copy_shock_visual_model_defaults()
+    chamber_d = max(
+        1.0,
+        float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
+    )
+    damper_shaft_d = max(
+        1.0,
+        float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])),
+    )
+    pos_shaft_d = max(
+        0.0,
+        float(
+            model.get(
+                "air_positive_shaft_diameter_mm",
+                _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"],
+            )
+        ),
+    )
+    piston_t = max(
+        0.0,
+        float(
+            model.get(
+                "air_piston_head_thickness_mm",
+                _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"],
+            )
+        ),
+    )
+    swept_len = max(
+        1e-3,
+        float(model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])),
+    )
+    neg_ext_len = max(
+        0.0,
+        float(
+            model.get(
+                "air_negative_chamber_length_mm",
+                _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"],
+            )
+        ),
+    )
+    body_gap = max(
+        0.0,
+        float(model.get("body_eyelet_gap_mm", _DEFAULT_SHOCK_MODEL["body_eyelet_gap_mm"])),
+    )
+    shaft_gap = max(
+        0.0,
+        float(model.get("shaft_eyelet_gap_mm", _DEFAULT_SHOCK_MODEL["shaft_eyelet_gap_mm"])),
+    )
+    eye_outer = max(18.0, 12.7 + 7.2)
+    visual["body_end_gap_mm"] = body_gap
+    visual["shaft_end_gap_mm"] = shaft_gap
+    visual["body_eyelet"] = {
+        "outer_diameter_mm": eye_outer,
+        "bore_diameter_mm": 12.7,
+    }
+    visual["body_end"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
+    visual["body_end_solid"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
+    visual["body_end_positive_chamber"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
+    visual["swept_air_chamber"] = {"length_mm": swept_len, "diameter_mm": chamber_d}
+    visual["negative_chamber_extension"] = {
+        "length_mm": neg_ext_len,
+        "diameter_mm": chamber_d,
+    }
+    visual["negative_annular_chamber"] = {
+        "length_mm": 0.0,
+        "inner_diameter_mm": chamber_d,
+        "outer_diameter_mm": chamber_d,
+    }
+    visual["damper_shaft"] = {"diameter_mm": damper_shaft_d}
+    visual["positive_chamber_shaft"] = {"diameter_mm": pos_shaft_d}
+    visual["piston"] = {"diameter_mm": chamber_d, "thickness_mm": piston_t}
+    visual["shaft_eyelet"] = {
+        "outer_diameter_mm": eye_outer,
+        "bore_diameter_mm": 12.7,
+    }
+    return visual
+
+
+def _normalize_shock_visual_model(raw_visual, model: dict[str, object]) -> dict[str, object]:
+    visual = _default_shock_visual_model_for_model(model)
+    if not isinstance(raw_visual, dict):
+        return visual
+
+    def _pair(name: str, diameter_default: float):
+        current = visual.get(name)
+        base = dict(current) if isinstance(current, dict) else {}
+        raw = raw_visual.get(name)
+        if isinstance(raw, dict):
+            length = _parse_optional_finite(raw.get("length_mm"))
+            diameter = _parse_optional_finite(raw.get("diameter_mm"))
+            if length is not None:
+                base["length_mm"] = max(0.0, length)
+            if diameter is not None:
+                base["diameter_mm"] = max(0.0, diameter)
+        base.setdefault("length_mm", 0.0)
+        base.setdefault("diameter_mm", diameter_default)
+        visual[name] = base
+
+    def _eyelet(name: str):
+        current = visual.get(name)
+        base = dict(current) if isinstance(current, dict) else {}
+        raw = raw_visual.get(name)
+        if isinstance(raw, dict):
+            outer = _parse_optional_finite(raw.get("outer_diameter_mm"))
+            bore = _parse_optional_finite(raw.get("bore_diameter_mm"))
+            if outer is not None:
+                base["outer_diameter_mm"] = max(1.0, outer)
+            if bore is not None:
+                base["bore_diameter_mm"] = max(0.0, bore)
+        if base.get("outer_diameter_mm", 0.0) < base.get("bore_diameter_mm", 0.0):
+            base["outer_diameter_mm"] = base["bore_diameter_mm"]
+        visual[name] = base
+
+    chamber_d = max(
+        1.0,
+        float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
+    )
+    _eyelet("body_eyelet")
+    _pair("body_end", chamber_d)
+    _pair("body_end_solid", chamber_d)
+    _pair("body_end_positive_chamber", chamber_d)
+    _pair("swept_air_chamber", chamber_d)
+    _pair("negative_chamber_extension", chamber_d)
+    _eyelet("shaft_eyelet")
+
+    annulus = visual.get("negative_annular_chamber")
+    annulus_base = dict(annulus) if isinstance(annulus, dict) else {}
+    annulus_raw = raw_visual.get("negative_annular_chamber")
+    if isinstance(annulus_raw, dict):
+        length = _parse_optional_finite(annulus_raw.get("length_mm"))
+        inner_d = _parse_optional_finite(annulus_raw.get("inner_diameter_mm"))
+        outer_d = _parse_optional_finite(annulus_raw.get("outer_diameter_mm"))
+        if length is not None:
+            annulus_base["length_mm"] = max(0.0, length)
+        if inner_d is not None:
+            annulus_base["inner_diameter_mm"] = max(0.0, inner_d)
+        if outer_d is not None:
+            annulus_base["outer_diameter_mm"] = max(0.0, outer_d)
+    annulus_base.setdefault("length_mm", 0.0)
+    annulus_base.setdefault("inner_diameter_mm", chamber_d)
+    annulus_base.setdefault("outer_diameter_mm", chamber_d)
+    annulus_base["outer_diameter_mm"] = max(
+        annulus_base["inner_diameter_mm"], annulus_base["outer_diameter_mm"]
+    )
+    visual["negative_annular_chamber"] = annulus_base
+
+    piston = visual.get("piston")
+    piston_base = dict(piston) if isinstance(piston, dict) else {}
+    piston_raw = raw_visual.get("piston")
+    if isinstance(piston_raw, dict):
+        diameter = _parse_optional_finite(piston_raw.get("diameter_mm"))
+        thickness = _parse_optional_finite(piston_raw.get("thickness_mm"))
+        if diameter is not None:
+            piston_base["diameter_mm"] = max(1.0, diameter)
+        if thickness is not None:
+            piston_base["thickness_mm"] = max(0.0, thickness)
+    piston_base.setdefault("diameter_mm", chamber_d)
+    piston_base.setdefault("thickness_mm", 0.0)
+    visual["piston"] = piston_base
+
+    for name, key in [
+        ("damper_shaft", "air_shaft_diameter_mm"),
+        ("positive_chamber_shaft", "air_positive_shaft_diameter_mm"),
+    ]:
+        current = visual.get(name)
+        base = dict(current) if isinstance(current, dict) else {}
+        raw = raw_visual.get(name)
+        if isinstance(raw, dict):
+            diameter = _parse_optional_finite(raw.get("diameter_mm"))
+            if diameter is not None:
+                base["diameter_mm"] = max(0.0, diameter)
+        base.setdefault(
+            "diameter_mm",
+            max(0.0, float(model.get(key, _DEFAULT_SHOCK_MODEL[key]))),
+        )
+        visual[name] = base
+
+    for key, legacy_key in [
+        ("body_end_gap_mm", "body_eyelet_gap_mm"),
+        ("shaft_end_gap_mm", "shaft_eyelet_gap_mm"),
+    ]:
+        value = _parse_optional_finite(raw_visual.get(key))
+        if value is None:
+            value = _parse_optional_finite(model.get(legacy_key))
+        if value is None:
+            value = float(visual.get(key) or chamber_d)
+        visual[key] = max(0.0, value)
+
+    return visual
 
 
 async def _ensure_default_shock_presets():
@@ -2171,16 +2424,30 @@ def _shock_preset_doc_to_out(doc: dict) -> ShockPresetOut:
         shock_type = "air"
     model_raw = doc.get("shock_model")
     model = dict(_DEFAULT_SHOCK_MODEL)
-    eyelet_gap_value = None
+    legacy_eyelet_gap_value = None
+    body_eyelet_gap_value = None
+    shaft_eyelet_gap_value = None
     if isinstance(model_raw, dict):
         for key in model.keys():
             value = _parse_optional_finite(model_raw.get(key))
             if value is not None:
                 model[key] = value
-            if key == "eyelet_gap_mm":
-                eyelet_gap_value = value
-    if eyelet_gap_value is None or eyelet_gap_value <= 0:
-        model["eyelet_gap_mm"] = model["air_chamber_diameter_mm"]
+        legacy_eyelet_gap_value = _parse_optional_finite(model_raw.get("eyelet_gap_mm"))
+        body_eyelet_gap_value = _parse_optional_finite(model_raw.get("body_eyelet_gap_mm"))
+        shaft_eyelet_gap_value = _parse_optional_finite(model_raw.get("shaft_eyelet_gap_mm"))
+    fallback_eyelet_gap = (
+        legacy_eyelet_gap_value
+        if legacy_eyelet_gap_value is not None and legacy_eyelet_gap_value > 0
+        else model["air_chamber_diameter_mm"]
+    )
+    if body_eyelet_gap_value is None or body_eyelet_gap_value <= 0:
+        model["body_eyelet_gap_mm"] = fallback_eyelet_gap
+    if shaft_eyelet_gap_value is None or shaft_eyelet_gap_value <= 0:
+        model["shaft_eyelet_gap_mm"] = fallback_eyelet_gap
+    model["visual_model"] = _normalize_shock_visual_model(
+        model_raw.get("visual_model") if isinstance(model_raw, dict) else None,
+        model,
+    )
     return ShockPresetOut(
         id=str(doc.get("_id")),
         preset_id=str(doc.get("preset_id") or ""),
@@ -2462,29 +2729,39 @@ def _get_sprocket_pitch_radius_mm(teeth: Optional[int]) -> Optional[float]:
     return pitch_diameter * 0.5
 
 
-def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dict[str, float]]:
+def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dict[str, object]]:
     geom = geometry if isinstance(geometry, dict) else {}
     raw_type = str(geom.get("shock_type") or "").strip().lower()
     shock_type = raw_type if raw_type in {"air", "coil"} else "air"
 
     raw_model = geom.get("shock_model")
     model: dict[str, float] = dict(_DEFAULT_SHOCK_MODEL)
-    eyelet_gap_value = None
+    legacy_eyelet_gap_value = None
+    body_eyelet_gap_value = None
+    shaft_eyelet_gap_value = None
     if isinstance(raw_model, dict):
-        for key, default_value in _DEFAULT_SHOCK_MODEL.items():
+        for key in _DEFAULT_SHOCK_MODEL.keys():
             value = _parse_optional_finite(raw_model.get(key))
             if value is None:
                 continue
             model[key] = value
-            if key == "eyelet_gap_mm":
-                eyelet_gap_value = value
+        legacy_eyelet_gap_value = _parse_optional_finite(raw_model.get("eyelet_gap_mm"))
+        body_eyelet_gap_value = _parse_optional_finite(raw_model.get("body_eyelet_gap_mm"))
+        shaft_eyelet_gap_value = _parse_optional_finite(raw_model.get("shaft_eyelet_gap_mm"))
 
     if model["coil_rate_n_per_mm"] <= 0:
         model["coil_rate_n_per_mm"] = _DEFAULT_SHOCK_MODEL["coil_rate_n_per_mm"]
     if model["air_chamber_diameter_mm"] <= 0:
         model["air_chamber_diameter_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"]
-    if eyelet_gap_value is None or model["eyelet_gap_mm"] <= 0:
-        model["eyelet_gap_mm"] = model["air_chamber_diameter_mm"]
+    fallback_eyelet_gap = (
+        legacy_eyelet_gap_value
+        if legacy_eyelet_gap_value is not None and legacy_eyelet_gap_value > 0
+        else model["air_chamber_diameter_mm"]
+    )
+    if body_eyelet_gap_value is None or model["body_eyelet_gap_mm"] <= 0:
+        model["body_eyelet_gap_mm"] = fallback_eyelet_gap
+    if shaft_eyelet_gap_value is None or model["shaft_eyelet_gap_mm"] <= 0:
+        model["shaft_eyelet_gap_mm"] = fallback_eyelet_gap
     if model["air_chamber_length_mm"] <= 0:
         model["air_chamber_length_mm"] = _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"]
     if model["air_negative_chamber_length_mm"] <= 0:
@@ -2516,6 +2793,11 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
         model["air_cold_temp_c"] = _DEFAULT_SHOCK_MODEL["air_cold_temp_c"]
     if model["air_hot_temp_c"] <= -273.0:
         model["air_hot_temp_c"] = _DEFAULT_SHOCK_MODEL["air_hot_temp_c"]
+
+    model["visual_model"] = _normalize_shock_visual_model(
+        raw_model.get("visual_model") if isinstance(raw_model, dict) else None,
+        model,
+    )
 
     return shock_type, model
 
