@@ -2069,6 +2069,11 @@ _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
         "length_mm": 0.0,
         "diameter_mm": 50.8,
     },
+    "positive_annular_chamber": {
+        "length_mm": 0.0,
+        "inner_diameter_mm": 50.8,
+        "outer_diameter_mm": 50.8,
+    },
     "swept_air_chamber": {
         "length_mm": 70.0,
         "diameter_mm": 50.8,
@@ -2253,6 +2258,11 @@ def _default_shock_visual_model_for_model(model: dict[str, object]) -> dict[str,
     }
     visual["body_end_solid"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
     visual["body_end_positive_chamber"] = {"length_mm": 0.0, "diameter_mm": chamber_d}
+    visual["positive_annular_chamber"] = {
+        "length_mm": 0.0,
+        "inner_diameter_mm": chamber_d,
+        "outer_diameter_mm": chamber_d,
+    }
     visual["swept_air_chamber"] = {"length_mm": swept_len, "diameter_mm": chamber_d}
     visual["negative_chamber_extension"] = {
         "length_mm": neg_ext_len,
@@ -2319,26 +2329,30 @@ def _normalize_shock_visual_model(raw_visual, model: dict[str, object]) -> dict[
     _pair("negative_chamber_extension", chamber_d)
     _eyelet("shaft_eyelet")
 
-    annulus = visual.get("negative_annular_chamber")
-    annulus_base = dict(annulus) if isinstance(annulus, dict) else {}
-    annulus_raw = raw_visual.get("negative_annular_chamber")
-    if isinstance(annulus_raw, dict):
-        length = _parse_optional_finite(annulus_raw.get("length_mm"))
-        inner_d = _parse_optional_finite(annulus_raw.get("inner_diameter_mm"))
-        outer_d = _parse_optional_finite(annulus_raw.get("outer_diameter_mm"))
-        if length is not None:
-            annulus_base["length_mm"] = max(0.0, length)
-        if inner_d is not None:
-            annulus_base["inner_diameter_mm"] = max(0.0, inner_d)
-        if outer_d is not None:
-            annulus_base["outer_diameter_mm"] = max(0.0, outer_d)
-    annulus_base.setdefault("length_mm", 0.0)
-    annulus_base.setdefault("inner_diameter_mm", chamber_d)
-    annulus_base.setdefault("outer_diameter_mm", chamber_d)
-    annulus_base["outer_diameter_mm"] = max(
-        annulus_base["inner_diameter_mm"], annulus_base["outer_diameter_mm"]
-    )
-    visual["negative_annular_chamber"] = annulus_base
+    def _annulus(name: str):
+        annulus = visual.get(name)
+        annulus_base = dict(annulus) if isinstance(annulus, dict) else {}
+        annulus_raw = raw_visual.get(name)
+        if isinstance(annulus_raw, dict):
+            length = _parse_optional_finite(annulus_raw.get("length_mm"))
+            inner_d = _parse_optional_finite(annulus_raw.get("inner_diameter_mm"))
+            outer_d = _parse_optional_finite(annulus_raw.get("outer_diameter_mm"))
+            if length is not None:
+                annulus_base["length_mm"] = max(0.0, length)
+            if inner_d is not None:
+                annulus_base["inner_diameter_mm"] = max(0.0, inner_d)
+            if outer_d is not None:
+                annulus_base["outer_diameter_mm"] = max(0.0, outer_d)
+        annulus_base.setdefault("length_mm", 0.0)
+        annulus_base.setdefault("inner_diameter_mm", chamber_d)
+        annulus_base.setdefault("outer_diameter_mm", chamber_d)
+        annulus_base["outer_diameter_mm"] = max(
+            annulus_base["inner_diameter_mm"], annulus_base["outer_diameter_mm"]
+        )
+        visual[name] = annulus_base
+
+    _annulus("positive_annular_chamber")
+    _annulus("negative_annular_chamber")
 
     piston = visual.get("piston")
     piston_base = dict(piston) if isinstance(piston, dict) else {}
@@ -2957,21 +2971,66 @@ def _compute_shock_force_and_rate_series(
 
 
 def _compute_rear_wheel_force_series(
-    leverage_ratio_series: list[Optional[float]],
-    shock_spring_rate_series: list[Optional[float]],
+    rear_travel_series: list[Optional[float]],
+    rear_wheel_force_n_series: list[Optional[float]],
 ) -> list[Optional[float]]:
-    length = min(len(leverage_ratio_series), len(shock_spring_rate_series))
+    length = min(len(rear_travel_series), len(rear_wheel_force_n_series))
     if length <= 0:
         return []
     out: list[Optional[float]] = []
     for idx in range(length):
-        lev = _parse_optional_finite(leverage_ratio_series[idx])
-        rate = _parse_optional_finite(shock_spring_rate_series[idx])
-        if lev is None or rate is None:
-            out.append(None)
+        x0 = _parse_optional_finite(rear_travel_series[idx])
+        y0 = _parse_optional_finite(rear_wheel_force_n_series[idx])
+        prev_idx: Optional[int] = None
+        next_idx: Optional[int] = None
+
+        for j in range(idx - 1, -1, -1):
+            x_prev = _parse_optional_finite(rear_travel_series[j])
+            y_prev = _parse_optional_finite(rear_wheel_force_n_series[j])
+            if x_prev is None or y_prev is None:
+                continue
+            if x0 is not None and abs(float(x0) - float(x_prev)) <= 1e-9:
+                continue
+            prev_idx = j
+            break
+
+        for j in range(idx + 1, length):
+            x_next = _parse_optional_finite(rear_travel_series[j])
+            y_next = _parse_optional_finite(rear_wheel_force_n_series[j])
+            if x_next is None or y_next is None:
+                continue
+            if x0 is not None and abs(float(x_next) - float(x0)) <= 1e-9:
+                continue
+            next_idx = j
+            break
+
+        if prev_idx is not None and next_idx is not None:
+            x_prev = float(rear_travel_series[prev_idx])  # type: ignore[arg-type]
+            y_prev = float(rear_wheel_force_n_series[prev_idx])  # type: ignore[arg-type]
+            x_next = float(rear_travel_series[next_idx])  # type: ignore[arg-type]
+            y_next = float(rear_wheel_force_n_series[next_idx])  # type: ignore[arg-type]
+            dx = x_next - x_prev
+            value = (y_next - y_prev) / dx if abs(dx) > 1e-9 else None
+            out.append(value if value is not None and math.isfinite(value) else None)
             continue
-        value = lev * rate
-        out.append(value if math.isfinite(value) else None)
+
+        if x0 is not None and y0 is not None and next_idx is not None:
+            x_next = float(rear_travel_series[next_idx])  # type: ignore[arg-type]
+            y_next = float(rear_wheel_force_n_series[next_idx])  # type: ignore[arg-type]
+            dx = x_next - float(x0)
+            value = (y_next - float(y0)) / dx if abs(dx) > 1e-9 else None
+            out.append(value if value is not None and math.isfinite(value) else None)
+            continue
+
+        if x0 is not None and y0 is not None and prev_idx is not None:
+            x_prev = float(rear_travel_series[prev_idx])  # type: ignore[arg-type]
+            y_prev = float(rear_wheel_force_n_series[prev_idx])  # type: ignore[arg-type]
+            dx = float(x0) - x_prev
+            value = (float(y0) - y_prev) / dx if abs(dx) > 1e-9 else None
+            out.append(value if value is not None and math.isfinite(value) else None)
+            continue
+
+        out.append(None)
     return out
 
 
@@ -4166,21 +4225,29 @@ async def compute_bike_kinematics(
             shock_model,
             temp_c=reference_temp_c,
         )
-        rear_wheel_force_series = _compute_rear_wheel_force_series(
-            leverage_ratio_series,
-            shock_spring_rate_series,
-        )
         rear_wheel_force_n_series = _compute_rear_wheel_force_n_series(
             shock_force_series,
             leverage_ratio_series,
         )
-        rear_wheel_force_full = _compute_rear_wheel_force_series(
-            leverage_ratio_full,
-            shock_spring_rate_full,
-        )
         rear_wheel_force_n_full = _compute_rear_wheel_force_n_series(
             shock_force_full,
             leverage_ratio_full,
+        )
+        rear_travel_series = [
+            (float(s.rear_travel) if s.rear_travel is not None else None)
+            for s in source_steps[trim_index:]
+        ]
+        rear_travel_full = [
+            (float(s.rear_travel) if s.rear_travel is not None else None)
+            for s in source_steps
+        ]
+        rear_wheel_force_series = _compute_rear_wheel_force_series(
+            rear_travel_series,
+            rear_wheel_force_n_series,
+        )
+        rear_wheel_force_full = _compute_rear_wheel_force_series(
+            rear_travel_full,
+            rear_wheel_force_n_full,
         )
 
         anti_squat_series = _compute_anti_squat_series(
