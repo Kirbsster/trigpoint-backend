@@ -177,6 +177,7 @@ class BikeGeometry(BaseModel):
     shock_type: ShockType | None = None
     shock_model: ShockModel | None = None
     shock_preset_id: str | None = None
+    cad_entities: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class BikePointsUpdate(BaseModel):
