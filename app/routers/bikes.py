@@ -36,6 +36,7 @@ from app.schemas import (
     BikeVariantHydrateOut,
     BikeVariantOut,
     BikeVariantUpdate,
+    ShockPresetCreate,
     ShockPresetOut,
     ShockModel,
 )
@@ -524,6 +525,25 @@ def _slugify_variant_name(value: Optional[str]) -> str:
     cleaned = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower())
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
     return cleaned[:64] if cleaned else "variant"
+
+
+def _slugify_shock_preset_name(value: Optional[str]) -> str:
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
+    return cleaned[:64] if cleaned else "shock-preset"
+
+
+async def _next_shock_preset_id(name: Optional[str], brand: Optional[str] = None) -> str:
+    base_parts = [str(brand or "").strip(), str(name or "").strip()]
+    base = _slugify_shock_preset_name("-".join(part for part in base_parts if part))
+    candidate = base
+    suffix = 2
+    presets = shock_presets_col()
+    while await presets.find_one({"preset_id": candidate}, {"_id": 1}):
+        suffix_str = f"-{suffix}"
+        candidate = f"{base[: max(1, 64 - len(suffix_str))]}{suffix_str}"
+        suffix += 1
+    return candidate
 
 
 def _variant_doc_to_out(doc: dict) -> BikeVariantOut:
@@ -1176,6 +1196,43 @@ async def list_shock_presets(current_user=Depends(get_current_user)):
         except Exception:
             continue
     return out
+
+
+@router.post("/shock-presets", response_model=ShockPresetOut, status_code=status.HTTP_201_CREATED)
+async def create_shock_preset(
+    payload: ShockPresetCreate,
+    current_user=Depends(get_current_user),
+):
+    user_oid = _extract_user_oid(current_user)
+    name = str(payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Shock preset name is required")
+
+    shock_type = str(payload.shock_type or "air").strip().lower()
+    if shock_type not in {"air", "coil"}:
+        shock_type = "air"
+
+    model = _coerce_full_shock_model_doc(payload.shock_model.model_dump())
+    preset_id = await _next_shock_preset_id(name, payload.brand)
+    now = datetime.utcnow()
+    doc = {
+        "preset_id": preset_id,
+        "name": name,
+        "brand": str(payload.brand).strip() if payload.brand is not None else None,
+        "category": str(payload.category).strip() if payload.category is not None else None,
+        "shock_type": shock_type,
+        "shock_model": model,
+        "sort_order": 1000,
+        "created_at": now,
+        "updated_at": now,
+        "created_by_user_id": user_oid,
+    }
+    try:
+        result = await shock_presets_col().insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Shock preset id already exists")
+    doc["_id"] = result.inserted_id
+    return _shock_preset_doc_to_out(doc)
 
 
 @router.get("/{bike_id}", response_model=BikeOut)
@@ -2232,23 +2289,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "category": "xc",
         "shock_type": "air",
         "sort_order": 10,
-        "shock_model": {
-            "air_chamber_diameter_mm": 50.8,
-            "body_eyelet_gap_mm": 50.8,
-            "shaft_eyelet_gap_mm": 50.8,
-            "air_chamber_length_mm": 70,
-            "air_negative_chamber_length_mm": 20.0,
-            "air_piston_head_thickness_mm": 5.0,
-            "air_shaft_diameter_mm": 25.4,
-            "air_positive_shaft_diameter_mm": 8.0,
-            "air_initial_pressure_psi": 175.0,
-            "air_reference_temp_c": 20.0,
-            "air_cold_temp_c": 5.0,
-            "air_hot_temp_c": 45.0,
-            "coil_rate_n_per_mm": 70.0,
-            "coil_preload_n": 0.0,
-            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
-        },
     },
     {
         "preset_id": "default_trail_enduro_air",
@@ -2257,23 +2297,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "category": "trail_enduro",
         "shock_type": "air",
         "sort_order": 20,
-        "shock_model": {
-            "air_chamber_diameter_mm": 50.8,
-            "body_eyelet_gap_mm": 50.8,
-            "shaft_eyelet_gap_mm": 50.8,
-            "air_chamber_length_mm": 70,
-            "air_negative_chamber_length_mm": 20.0,
-            "air_piston_head_thickness_mm": 5.0,
-            "air_shaft_diameter_mm": 25.4,
-            "air_positive_shaft_diameter_mm": 8.0,
-            "air_initial_pressure_psi": 175.0,
-            "air_reference_temp_c": 20.0,
-            "air_cold_temp_c": 5.0,
-            "air_hot_temp_c": 45.0,
-            "coil_rate_n_per_mm": 70.0,
-            "coil_preload_n": 0.0,
-            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
-        },
     },
     {
         "preset_id": "default_dh_air",
@@ -2282,23 +2305,6 @@ _DEFAULT_SHOCK_PRESETS: list[dict] = [
         "category": "dh",
         "shock_type": "air",
         "sort_order": 30,
-        "shock_model": {
-            "air_chamber_diameter_mm": 50.8,
-            "body_eyelet_gap_mm": 50.8,
-            "shaft_eyelet_gap_mm": 50.8,
-            "air_chamber_length_mm": 70,
-            "air_negative_chamber_length_mm": 20.0,
-            "air_piston_head_thickness_mm": 5.0,
-            "air_shaft_diameter_mm": 25.4,
-            "air_positive_shaft_diameter_mm": 8.0,
-            "air_initial_pressure_psi": 175.0,
-            "air_reference_temp_c": 20.0,
-            "air_cold_temp_c": 5.0,
-            "air_hot_temp_c": 45.0,
-            "coil_rate_n_per_mm": 70.0,
-            "coil_preload_n": 0.0,
-            "visual_model": dict(_DEFAULT_SHOCK_VISUAL_MODEL),
-        },
     },
 ]
 
@@ -2521,15 +2527,70 @@ def _normalize_shock_visual_model(raw_visual, model: dict[str, object]) -> dict[
     return visual
 
 
+def _build_full_default_shock_model(overrides: Optional[dict] = None) -> dict[str, object]:
+    model: dict[str, object] = dict(_DEFAULT_SHOCK_MODEL)
+    if isinstance(overrides, dict):
+        for key in _DEFAULT_SHOCK_MODEL.keys():
+            value = _parse_optional_finite(overrides.get(key))
+            if value is not None:
+                model[key] = float(value)
+    model["visual_model"] = _normalize_shock_visual_model(
+        overrides.get("visual_model") if isinstance(overrides, dict) else None,
+        model,
+    )
+    return model
+
+
+def _coerce_full_shock_visual_model(raw_visual) -> dict[str, object]:
+    if not isinstance(raw_visual, dict):
+        raise ValueError("Shock preset visual_model must be a dict")
+
+    out: dict[str, object] = {}
+    for key, default_value in _DEFAULT_SHOCK_VISUAL_MODEL.items():
+        raw_value = raw_visual.get(key)
+        if isinstance(default_value, dict):
+            if not isinstance(raw_value, dict):
+                raise ValueError(f"Shock preset visual_model.{key} must be a dict")
+            nested: dict[str, float] = {}
+            for nested_key in default_value.keys():
+                parsed = _parse_optional_finite(raw_value.get(nested_key))
+                if parsed is None:
+                    raise ValueError(
+                        f"Shock preset visual_model.{key}.{nested_key} is required"
+                    )
+                nested[nested_key] = float(parsed)
+            out[key] = nested
+            continue
+
+        parsed = _parse_optional_finite(raw_value)
+        if parsed is None:
+            raise ValueError(f"Shock preset visual_model.{key} is required")
+        out[key] = float(parsed)
+
+    return out
+
+
+def _coerce_full_shock_model_doc(raw_model) -> dict[str, object]:
+    if not isinstance(raw_model, dict):
+        raise ValueError("Shock preset shock_model must be a dict")
+
+    model: dict[str, object] = {}
+    for key in _DEFAULT_SHOCK_MODEL.keys():
+        parsed = _parse_optional_finite(raw_model.get(key))
+        if parsed is None:
+            raise ValueError(f"Shock preset shock_model.{key} is required")
+        model[key] = float(parsed)
+
+    model["visual_model"] = _coerce_full_shock_visual_model(raw_model.get("visual_model"))
+    return model
+
+
 async def _ensure_default_shock_presets():
     presets = shock_presets_col()
     now = datetime.utcnow()
     for preset in _DEFAULT_SHOCK_PRESETS:
         preset_id = str(preset.get("preset_id") or "").strip()
         if not preset_id:
-            continue
-        existing = await presets.find_one({"preset_id": preset_id})
-        if existing:
             continue
         doc = {
             "preset_id": preset_id,
@@ -2538,12 +2599,20 @@ async def _ensure_default_shock_presets():
             "category": preset.get("category"),
             "shock_type": preset.get("shock_type") or "air",
             "sort_order": int(preset.get("sort_order") or 100),
-            "shock_model": preset.get("shock_model") or dict(_DEFAULT_SHOCK_MODEL),
-            "created_at": now,
+            "shock_model": _build_full_default_shock_model(
+                preset.get("shock_model") if isinstance(preset.get("shock_model"), dict) else None
+            ),
             "updated_at": now,
         }
         try:
-            await presets.insert_one(doc)
+            await presets.update_one(
+                {"preset_id": preset_id},
+                {
+                    "$set": doc,
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
         except DuplicateKeyError:
             continue
 
@@ -2552,32 +2621,7 @@ def _shock_preset_doc_to_out(doc: dict) -> ShockPresetOut:
     shock_type = str(doc.get("shock_type") or "air").strip().lower()
     if shock_type not in {"air", "coil"}:
         shock_type = "air"
-    model_raw = doc.get("shock_model")
-    model = dict(_DEFAULT_SHOCK_MODEL)
-    legacy_eyelet_gap_value = None
-    body_eyelet_gap_value = None
-    shaft_eyelet_gap_value = None
-    if isinstance(model_raw, dict):
-        for key in model.keys():
-            value = _parse_optional_finite(model_raw.get(key))
-            if value is not None:
-                model[key] = value
-        legacy_eyelet_gap_value = _parse_optional_finite(model_raw.get("eyelet_gap_mm"))
-        body_eyelet_gap_value = _parse_optional_finite(model_raw.get("body_eyelet_gap_mm"))
-        shaft_eyelet_gap_value = _parse_optional_finite(model_raw.get("shaft_eyelet_gap_mm"))
-    fallback_eyelet_gap = (
-        legacy_eyelet_gap_value
-        if legacy_eyelet_gap_value is not None and legacy_eyelet_gap_value > 0
-        else model["air_chamber_diameter_mm"]
-    )
-    if body_eyelet_gap_value is None or body_eyelet_gap_value <= 0:
-        model["body_eyelet_gap_mm"] = fallback_eyelet_gap
-    if shaft_eyelet_gap_value is None or shaft_eyelet_gap_value <= 0:
-        model["shaft_eyelet_gap_mm"] = fallback_eyelet_gap
-    model["visual_model"] = _normalize_shock_visual_model(
-        model_raw.get("visual_model") if isinstance(model_raw, dict) else None,
-        model,
-    )
+    model = _coerce_full_shock_model_doc(doc.get("shock_model"))
     return ShockPresetOut(
         id=str(doc.get("_id")),
         preset_id=str(doc.get("preset_id") or ""),

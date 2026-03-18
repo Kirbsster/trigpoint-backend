@@ -166,6 +166,14 @@ class ShockPresetOut(BaseModel):
     shock_model: ShockModel
 
 
+class ShockPresetCreate(BaseModel):
+    name: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    shock_type: ShockType = "air"
+    shock_model: ShockModel
+
+
 class BikeGeometry(BaseModel):
     rear_center_mm: float | None = None
     front_center_mm: float | None = None
