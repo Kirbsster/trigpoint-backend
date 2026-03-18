@@ -225,6 +225,14 @@ class BikeOut(BaseModel):
     brand: str
     model_year: Optional[int] = None
     bike_size: Optional[str] = None
+    front_wheel_size: Optional[str] = None
+    rear_wheel_size: Optional[str] = None
+    brake_rotor_front_mm: Optional[int] = None
+    brake_rotor_rear_mm: Optional[int] = None
+    rear_brake_ic_body_id: Optional[str] = None
+    frame_cg_x_mm: Optional[float] = None
+    frame_cg_y_mm: Optional[float] = None
+    frame_mass_kg: Optional[float] = None
     user_id: str
     owner_user_id: str
     creator_shareable_id: Optional[str] = None
@@ -253,6 +261,14 @@ class BikeUpdate(BaseModel):
     brand: Optional[str] = None
     model_year: Optional[int] = None
     bike_size: Optional[str] = None
+    front_wheel_size: Optional[str] = None
+    rear_wheel_size: Optional[str] = None
+    brake_rotor_front_mm: Optional[int] = None
+    brake_rotor_rear_mm: Optional[int] = None
+    rear_brake_ic_body_id: Optional[str] = None
+    frame_cg_x_mm: Optional[float] = None
+    frame_cg_y_mm: Optional[float] = None
+    frame_mass_kg: Optional[float] = None
 
 
 class BikeAccessUpdate(BaseModel):

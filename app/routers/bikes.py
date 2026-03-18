@@ -64,6 +64,44 @@ from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
+_BIKE_SHARED_SETTINGS_DEFAULTS = {
+    "front_wheel_size": "29",
+    "rear_wheel_size": "29",
+    "brake_rotor_front_mm": 203,
+    "brake_rotor_rear_mm": 203,
+    "rear_brake_ic_body_id": "",
+    "frame_cg_x_mm": None,
+    "frame_cg_y_mm": None,
+    "frame_mass_kg": None,
+}
+
+_PAGE_SETTINGS_DEFAULTS = {
+    "perspective_mode": "off",
+    "show_measurements": True,
+    "show_ellipses": True,
+    "show_detection_boxes": False,
+    "show_ground_plane": False,
+    "show_drivetrain": True,
+    "show_center_of_gravity": True,
+    "show_anti_squat": True,
+    "show_anti_rise": True,
+    "show_instant_center": True,
+    "show_shock_overlay": True,
+    "drivetrain_chainring_teeth": None,
+    "drivetrain_cassette_teeth": None,
+    "drivetrain_idler_teeth": None,
+    "flip_chip_mode_id": "base",
+    "active_variant_id": "",
+    "rider_cg_x_mm": None,
+    "rider_cg_y_mm": None,
+    "rider_mass_kg": None,
+    "shock_target_sag_pct": 30,
+    "image_greyscale": False,
+    "image_opacity": 1.0,
+    "solver_step_index": 0,
+    "point_origin_id": "",
+}
+
 
 def _round_to_nearest_10_mm(value: Optional[float]) -> Optional[int]:
     if value is None:
@@ -192,6 +230,14 @@ def bike_doc_to_out(
         brand=doc["brand"],
         model_year=doc.get("model_year"),
         bike_size=doc.get("bike_size"),
+        front_wheel_size=doc.get("front_wheel_size"),
+        rear_wheel_size=doc.get("rear_wheel_size"),
+        brake_rotor_front_mm=doc.get("brake_rotor_front_mm"),
+        brake_rotor_rear_mm=doc.get("brake_rotor_rear_mm"),
+        rear_brake_ic_body_id=doc.get("rear_brake_ic_body_id"),
+        frame_cg_x_mm=doc.get("frame_cg_x_mm"),
+        frame_cg_y_mm=doc.get("frame_cg_y_mm"),
+        frame_mass_kg=doc.get("frame_mass_kg"),
         # Avoid "None" string if user_id is missing on old docs
         user_id=str(doc["user_id"]) if doc.get("user_id") is not None else "",
         owner_user_id=str(owner_raw) if owner_raw is not None else "",
@@ -419,16 +465,58 @@ def _load_perspective_homography(entry: dict | None) -> Optional[dict]:
 
 
 def _default_page_settings() -> dict:
+    return dict(_PAGE_SETTINGS_DEFAULTS)
+
+
+def _default_bike_shared_settings() -> dict:
+    return dict(_BIKE_SHARED_SETTINGS_DEFAULTS)
+
+
+def _bike_shared_settings_from_doc(doc: Optional[dict]) -> dict:
+    settings = _default_bike_shared_settings()
+    if not isinstance(doc, dict):
+        return settings
+    for key in _BIKE_SHARED_SETTINGS_DEFAULTS.keys():
+        if key in doc:
+            settings[key] = doc.get(key)
+    return settings
+
+
+def _legacy_bike_shared_settings_patch(
+    bike_doc: Optional[dict],
+    raw_settings: Optional[dict],
+) -> dict:
+    if not isinstance(bike_doc, dict) or not isinstance(raw_settings, dict):
+        return {}
+    patch: dict[str, object] = {}
+    for key in _BIKE_SHARED_SETTINGS_DEFAULTS.keys():
+        if bike_doc.get(key) is not None:
+            continue
+        value = raw_settings.get(key)
+        if value is None:
+            continue
+        if key == "rear_brake_ic_body_id" and not str(value).strip():
+            continue
+        patch[key] = value
+    return patch
+
+
+def _normalize_page_settings(raw_settings: Optional[dict]) -> dict:
+    settings = _default_page_settings()
+    if isinstance(raw_settings, dict):
+        for key in _PAGE_SETTINGS_DEFAULTS.keys():
+            if key in raw_settings:
+                settings[key] = raw_settings.get(key)
+    return settings
+
+
+def _page_settings_patch_from_payload(raw_settings: Optional[dict]) -> dict:
+    if not isinstance(raw_settings, dict):
+        return {}
     return {
-        "perspective_mode": "off",
-        "show_measurements": True,
-        "show_ellipses": True,
-        "show_detection_boxes": False,
-        "front_wheel_size": "29",
-        "rear_wheel_size": "29",
-        "brake_rotor_front_mm": 203,
-        "brake_rotor_rear_mm": 203,
-        "rear_brake_ic_body_id": "",
+        key: raw_settings.get(key)
+        for key in _PAGE_SETTINGS_DEFAULTS.keys()
+        if key in raw_settings
     }
 
 
@@ -717,7 +805,7 @@ def _page_settings_doc_to_out(doc) -> BikePageSettingsOut:
         user_id=str(doc["user_id"]),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
-        settings=doc.get("settings", {}),
+        settings=_normalize_page_settings(doc.get("settings")),
     )
 
 
@@ -747,6 +835,7 @@ async def create_bike(
         "brand": bike_in.brand,
         "model_year": bike_in.model_year,
         "bike_size": bike_in.bike_size,
+        **_default_bike_shared_settings(),
         "created_at": now,
         "updated_at": now,
     }
@@ -1107,6 +1196,20 @@ async def get_bike(
         raise HTTPException(status_code=404, detail="Bike not found")
     if not _can_view_bike(doc, user_oid, is_admin):
         raise HTTPException(status_code=403, detail="Not allowed to view this bike")
+    if _is_bike_owner(doc, user_oid):
+        settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
+        legacy_patch = _legacy_bike_shared_settings_patch(
+            doc,
+            settings_doc.get("settings") if settings_doc else None,
+        )
+        if legacy_patch:
+            migrated_updated_at = datetime.utcnow()
+            await bikes.update_one(
+                {"_id": oid, **_owner_filter(user_oid)},
+                {"$set": {**legacy_patch, "updated_at": migrated_updated_at}},
+            )
+            doc.update(legacy_patch)
+            doc["updated_at"] = migrated_updated_at
 
     hero_id = doc.get("hero_media_id")
     hero_url = await resolve_hero_url(hero_id)
@@ -1286,6 +1389,23 @@ async def get_page_settings(
     settings_col = bike_page_settings_col()
     doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
     if doc:
+        if _is_bike_owner(bike, user_oid):
+            legacy_patch = _legacy_bike_shared_settings_patch(bike, doc.get("settings"))
+            if legacy_patch:
+                migrated_updated_at = datetime.utcnow()
+                await bikes.update_one(
+                    {"_id": oid, **_owner_filter(user_oid)},
+                    {"$set": {**legacy_patch, "updated_at": migrated_updated_at}},
+                )
+                bike.update(legacy_patch)
+                bike["updated_at"] = migrated_updated_at
+        normalized_settings = _normalize_page_settings(doc.get("settings"))
+        if normalized_settings != doc.get("settings"):
+            await settings_col.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"settings": normalized_settings}},
+            )
+            doc["settings"] = normalized_settings
         return _page_settings_doc_to_out(doc)
 
     payload = _default_page_settings()
@@ -1331,7 +1451,7 @@ async def update_page_settings(
         raise HTTPException(status_code=403, detail="Not allowed to edit settings for this bike")
 
     settings_col = bike_page_settings_col()
-    patch = payload.settings or {}
+    patch = _page_settings_patch_from_payload(payload.settings)
     now = datetime.utcnow()
 
     doc = await settings_col.find_one({"bike_id": oid, "user_id": user_oid})
@@ -1348,9 +1468,11 @@ async def update_page_settings(
         await settings_col.insert_one(doc)
         return _page_settings_doc_to_out(doc)
 
+    merged_settings = _normalize_page_settings(doc.get("settings"))
+    merged_settings.update(patch)
     await settings_col.update_one(
         {"_id": doc["_id"]},
-        {"$set": {"settings": {**doc.get("settings", {}), **patch}, "updated_at": now}},
+        {"$set": {"settings": merged_settings, "updated_at": now}},
     )
     updated = await settings_col.find_one({"_id": doc["_id"]})
     return _page_settings_doc_to_out(updated)
@@ -3751,9 +3873,10 @@ async def compute_bike_kinematics(
     variant_target_points = _apply_variant_point_overrides_to_points(points, variant_overrides)
 
     settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
-    base_settings = settings_doc.get("settings") if settings_doc else {}
-    if not isinstance(base_settings, dict):
-        base_settings = {}
+    base_settings = _bike_shared_settings_from_doc(doc)
+    base_settings.update(
+        _normalize_page_settings(settings_doc.get("settings") if settings_doc else None)
+    )
     settings = _merge_variant_overrides_into_settings(base_settings, variant_overrides)
     perspective_mode = settings.get("perspective_mode", "off")
     settings_found = settings_doc is not None
@@ -4462,7 +4585,9 @@ async def debug_bike(
         media_doc = await media_items_col().find_one({"_id": hero_id, "bike_id": oid})
 
     settings_doc = await bike_page_settings_col().find_one({"bike_id": oid, "user_id": user_oid})
-    settings_payload = settings_doc.get("settings") if settings_doc else None
+    settings_payload = (
+        _normalize_page_settings(settings_doc.get("settings")) if settings_doc else None
+    )
 
     return {
         "db_name": settings.mongodb_db_name,
