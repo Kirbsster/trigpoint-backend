@@ -92,6 +92,7 @@ _PAGE_SETTINGS_DEFAULTS = {
     "drivetrain_cassette_teeth": None,
     "drivetrain_idler_teeth": None,
     "flip_chip_mode_id": "base",
+    "flip_chip_selected_state_ids_by_variant": {},
     "active_variant_id": "",
     "rider_cg_x_mm": None,
     "rider_cg_y_mm": None,
