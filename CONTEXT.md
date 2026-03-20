@@ -53,6 +53,20 @@ Preferred solver traits:
 - Avoid pandas in solver core (NumPy preferred)
 - JSON output must be frontend-friendly
 
+Current authored-bike schema notes:
+- `RigidBody.type` now also supports `flip_chip`
+- `flip_chip` bodies are authored state selectors, not rigid solver members
+- `flip_chip.point_ids` stores ordered state points
+- `flip_chip.driver_point_id` identifies the linkage-connected point to reposition
+- `flip_chip.selected_state_point_id` stores the base-bike default active state
+- Variant overrides may include `flip_chip_selected_state_ids`, mapping body id to selected state point id
+
+Solver notes for flip chip:
+- Filter `flip_chip` bodies out of the rigid linkage solve itself
+- Build pose constraints from the selected flip-chip state before shock-travel solving
+- Use the solved rest pose as zero travel for the linkage/travel solver
+- Keep wheel contact and bottom-bracket anchoring constraints explicit in the pose solve
+
 Example result fields:
 - wheel_travel
 - shock_travel

@@ -117,11 +117,13 @@ class RigidBody(BaseModel):
     id: str
     name: Optional[str] = None
     point_ids: List[str] = Field(default_factory=list)
-    type: Optional[str] = None          # "bar" | "shock" | ...
+    type: Optional[str] = None          # "bar" | "shock" | "flip_chip" | ...
     brake_caliper_point_id: Optional[str] = None  # optional rear-brake caliper anchor point id
     closed: bool = False                # for loops (probably False for linkages)
     length0: Optional[float] = None     # shock eye-to-eye at zero stroke [px or mm]
     stroke: Optional[float] = None      # total shock stroke [same units as length0]
+    driver_point_id: Optional[str] = None  # for flip chips: linkage-connected point to reposition
+    selected_state_point_id: Optional[str] = None  # for flip chips: active state point id
     display_geometry: Optional[BodyDisplayGeometry] = None
 
 class PerspectiveCorrection(BaseModel):

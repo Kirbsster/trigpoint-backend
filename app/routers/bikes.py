@@ -751,20 +751,135 @@ def _apply_variant_overrides_to_bodies(
 
     shock_eye_mm = _parse_optional_finite(overrides.get("shock_eye_mm"))
     shock_stroke_mm = _parse_optional_finite(overrides.get("shock_stroke_mm"))
+    flip_chip_selected_state_ids = (
+        overrides.get("flip_chip_selected_state_ids")
+        if isinstance(overrides.get("flip_chip_selected_state_ids"), dict)
+        else {}
+    )
 
     out: List[RigidBody] = []
     for body in bodies:
-        if body.type != "shock":
-            out.append(body.copy(deep=True))
-            continue
-
+        body_type = str(getattr(body, "type", "") or "").strip().lower()
         update: dict = {}
-        if shock_eye_mm is not None and scale_mm_per_px > 0:
-            update["length0"] = shock_eye_mm / scale_mm_per_px
-        if shock_stroke_mm is not None:
-            update["stroke"] = shock_stroke_mm
+
+        if body_type == "shock":
+            if shock_eye_mm is not None and scale_mm_per_px > 0:
+                update["length0"] = shock_eye_mm / scale_mm_per_px
+            if shock_stroke_mm is not None:
+                update["stroke"] = shock_stroke_mm
+        elif body_type == "flip_chip":
+            body_id = str(getattr(body, "id", "") or "").strip()
+            override_state_id = (
+                str(flip_chip_selected_state_ids.get(body_id) or "").strip()
+                if body_id
+                else ""
+            )
+            if override_state_id:
+                update["selected_state_point_id"] = override_state_id
+
         out.append(body.copy(update=update) if update else body.copy(deep=True))
     return out
+
+
+def _solver_rigid_bodies_only(bodies: List[RigidBody]) -> List[RigidBody]:
+    out: List[RigidBody] = []
+    for body in bodies or []:
+        body_type = str(getattr(body, "type", "") or "").strip().lower()
+        if body_type == "flip_chip":
+            continue
+        out.append(body.copy(deep=True))
+    return out
+
+
+def _build_flip_chip_pose_constraints(
+    points: List[BikePoint],
+    bodies: List[RigidBody],
+) -> dict[str, dict[str, float]]:
+    if not points or not bodies:
+        return {}
+
+    point_by_id = {
+        str(point.id or "").strip(): point
+        for point in points
+        if str(point.id or "").strip()
+    }
+    linkage_point_ids: set[str] = set()
+    for body in bodies:
+        body_type = str(getattr(body, "type", "") or "").strip().lower()
+        if body_type == "flip_chip":
+            continue
+        for point_id in getattr(body, "point_ids", None) or []:
+            point_id_str = str(point_id or "").strip()
+            if point_id_str:
+                linkage_point_ids.add(point_id_str)
+
+    constraints: dict[str, dict[str, float]] = {}
+    for body in bodies:
+        body_type = str(getattr(body, "type", "") or "").strip().lower()
+        if body_type != "flip_chip":
+            continue
+
+        body_id = str(getattr(body, "id", "") or "").strip()
+        state_point_ids = [
+            str(point_id or "").strip()
+            for point_id in (getattr(body, "point_ids", None) or [])
+            if str(point_id or "").strip()
+        ]
+        if len(state_point_ids) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flip chip '{body_id or 'unknown'}' requires at least two state points.",
+            )
+
+        driver_point_id = str(getattr(body, "driver_point_id", "") or "").strip()
+        if not driver_point_id:
+            driver_point_id = next(
+                (point_id for point_id in state_point_ids if point_id in linkage_point_ids),
+                "",
+            )
+        if not driver_point_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Flip chip '{body_id or 'unknown'}' must reference a linkage-connected "
+                    "driver point before solving."
+                ),
+            )
+        if driver_point_id not in point_by_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flip chip '{body_id or 'unknown'}' driver point is missing from bike points.",
+            )
+
+        selected_state_point_id = str(getattr(body, "selected_state_point_id", "") or "").strip()
+        if not selected_state_point_id:
+            selected_state_point_id = driver_point_id
+        if selected_state_point_id not in state_point_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Flip chip '{body_id or 'unknown'}' selected state "
+                    f"'{selected_state_point_id}' is not one of its state points."
+                ),
+            )
+        if selected_state_point_id not in point_by_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flip chip '{body_id or 'unknown'}' selected state point is missing from bike points.",
+            )
+
+        driver_point = point_by_id[driver_point_id]
+        state_point = point_by_id[selected_state_point_id]
+        dx = float(state_point.x) - float(driver_point.x)
+        dy = float(state_point.y) - float(driver_point.y)
+        if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+            continue
+        constraints[driver_point_id] = {
+            "x": float(state_point.x),
+            "y": float(state_point.y),
+        }
+
+    return constraints
 
 
 def _variant_fingerprint(
@@ -2709,6 +2824,10 @@ def _variant_requires_rest_pose(
     if _parse_optional_finite(overrides.get("shock_eye_mm")) is not None:
         return True
 
+    flip_chip_selected_state_ids = overrides.get("flip_chip_selected_state_ids")
+    if isinstance(flip_chip_selected_state_ids, dict) and flip_chip_selected_state_ids:
+        return True
+
     point_overrides = overrides.get("point_overrides")
     if not isinstance(point_overrides, dict) or not point_overrides:
         return False
@@ -4180,17 +4299,54 @@ async def compute_bike_kinematics(
             float(mm_value),
         )
 
-    # ---- Convert shock stroke from mm → px for the solver ----
-    bodies_for_solver = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
-    shock_length0_px = _resolve_shock_length0_px(points, bodies_for_solver, geom, scale_mm_per_px)
+    # ---- Apply overrides to authored bodies and prepare solver-only bodies ----
+    authored_bodies = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
+    solver_bodies = _solver_rigid_bodies_only(authored_bodies)
+
+    variant_point_constraints = _build_variant_point_constraints(
+        variant_target_points,
+        variant_overrides,
+    )
+    flip_chip_pose_constraints = _build_flip_chip_pose_constraints(variant_target_points, authored_bodies)
+    rest_pose_constraints: dict[str, dict[str, float]] = {
+        **flip_chip_pose_constraints,
+        **variant_point_constraints,
+    }
+
+    pose_required = bool(rest_pose_constraints)
+    if variant_doc is not None and _variant_requires_rest_pose(
+        base_settings,
+        settings,
+        variant_overrides,
+        points=points,
+        bodies=solver_bodies,
+    ):
+        pose_required = True
+
+    if pose_required:
+        points, pose_debug = _compute_variant_rest_pose(
+            points=points,
+            bodies=solver_bodies,
+            scale_mm_per_px=scale_mm_per_px,
+            base_settings=base_settings,
+            effective_settings=settings,
+            iterations=iterations,
+            override_point_constraints=rest_pose_constraints,
+        )
+    elif variant_doc is not None:
+        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "variant_no_pose_delta"}
+    else:
+        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
+
+    shock_length0_px = _resolve_shock_length0_px(points, solver_bodies, geom, scale_mm_per_px)
     if shock_length0_px is not None:
         normalized_bodies_for_solver: List[RigidBody] = []
-        for body in bodies_for_solver:
+        for body in solver_bodies:
             if body.type == "shock":
                 normalized_bodies_for_solver.append(body.copy(update={"length0": float(shock_length0_px)}))
             else:
                 normalized_bodies_for_solver.append(body)
-        bodies_for_solver = normalized_bodies_for_solver
+        solver_bodies = normalized_bodies_for_solver
 
     if variant_doc is not None:
         variant_fingerprint = _variant_fingerprint(
@@ -4201,17 +4357,10 @@ async def compute_bike_kinematics(
             steps=steps,
             iterations=iterations,
         )
-        # Temporary: disable variant rest-pose solving so authored points stay in
-        # the same frame as the hero image until variant/state handling is
-        # redesigned.
-        points = variant_target_points
-        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "disabled"}
-    else:
-        pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
 
     # ---- Convert shock stroke from mm → px for the solver ----
     bodies_for_solver_px: List[RigidBody] = []
-    for b in bodies_for_solver:
+    for b in solver_bodies:
         if b.type == "shock" and b.stroke is not None:
             stroke_mm = float(b.stroke)
             stroke_px = stroke_mm / scale_mm_per_px
@@ -4222,7 +4371,7 @@ async def compute_bike_kinematics(
 
     # ---- Run solver (all geometry in px) ----
     pre_steps = 10
-    if variant_doc is not None and pose_debug.get("applied"):
+    if pose_debug.get("applied"):
         pre_steps = 0
 
     try:
