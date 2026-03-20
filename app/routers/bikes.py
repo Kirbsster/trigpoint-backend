@@ -791,61 +791,6 @@ def _solver_rigid_bodies_only(bodies: List[RigidBody]) -> List[RigidBody]:
     return out
 
 
-def _apply_flip_chip_state_point_references(
-    bodies: List[RigidBody],
-) -> List[RigidBody]:
-    if not bodies:
-        return []
-
-    point_reference_map: dict[str, str] = {}
-    for body in bodies:
-        body_type = str(getattr(body, "type", "") or "").strip().lower()
-        if body_type != "flip_chip":
-            continue
-        driver_point_id = str(getattr(body, "driver_point_id", "") or "").strip()
-        selected_state_point_id = str(getattr(body, "selected_state_point_id", "") or "").strip()
-        if not driver_point_id or not selected_state_point_id or driver_point_id == selected_state_point_id:
-            continue
-        point_reference_map[driver_point_id] = selected_state_point_id
-
-    if not point_reference_map:
-        return [body.copy(deep=True) for body in bodies]
-
-    def _remap_point_ids(point_ids: list[str] | None) -> list[str]:
-        remapped: list[str] = []
-        seen: set[str] = set()
-        for point_id in point_ids or []:
-            point_id_str = str(point_id or "").strip()
-            if not point_id_str:
-                continue
-            target_id = point_reference_map.get(point_id_str, point_id_str)
-            if target_id in seen:
-                continue
-            seen.add(target_id)
-            remapped.append(target_id)
-        return remapped
-
-    out: List[RigidBody] = []
-    for body in bodies:
-        body_type = str(getattr(body, "type", "") or "").strip().lower()
-        if body_type == "flip_chip":
-            out.append(body.copy(deep=True))
-            continue
-        updated_point_ids = _remap_point_ids(getattr(body, "point_ids", None) or [])
-        update: dict[str, object] = {}
-        if updated_point_ids != list(getattr(body, "point_ids", None) or []):
-            update["point_ids"] = updated_point_ids
-
-        brake_caliper_point_id = str(getattr(body, "brake_caliper_point_id", "") or "").strip()
-        if brake_caliper_point_id:
-            remapped_caliper_id = point_reference_map.get(brake_caliper_point_id, brake_caliper_point_id)
-            if remapped_caliper_id != brake_caliper_point_id:
-                update["brake_caliper_point_id"] = remapped_caliper_id
-
-        out.append(body.copy(update=update) if update else body.copy(deep=True))
-    return out
-
-
 def _build_flip_chip_pose_constraints(
     points: List[BikePoint],
     bodies: List[RigidBody],
@@ -923,8 +868,13 @@ def _build_flip_chip_pose_constraints(
                 detail=f"Flip chip '{body_id or 'unknown'}' selected state point is missing from bike points.",
             )
 
+        driver_point = point_by_id[driver_point_id]
         state_point = point_by_id[selected_state_point_id]
-        constraints[selected_state_point_id] = {
+        dx = float(state_point.x) - float(driver_point.x)
+        dy = float(state_point.y) - float(driver_point.y)
+        if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+            continue
+        constraints[driver_point_id] = {
             "x": float(state_point.x),
             "y": float(state_point.y),
         }
@@ -4541,8 +4491,7 @@ async def compute_bike_kinematics(
 
     # ---- Apply overrides to authored bodies and prepare solver-only bodies ----
     authored_bodies = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
-    effective_bodies = _apply_flip_chip_state_point_references(authored_bodies)
-    solver_bodies = _solver_rigid_bodies_only(effective_bodies)
+    solver_bodies = _solver_rigid_bodies_only(authored_bodies)
 
     variant_point_constraints = _build_variant_point_constraints(
         variant_target_points,
@@ -4690,7 +4639,7 @@ async def compute_bike_kinematics(
 
     # Instant center coordinates (same coordinate space/shape as point coords lists).
     rear_body_point_ids = _pick_rear_body_point_ids(
-        effective_bodies,
+        authored_bodies,
         result.rear_axle_point_id,
         points,
         preferred_body_id=str(settings.get("rear_brake_ic_body_id") or ""),
