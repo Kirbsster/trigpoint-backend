@@ -2865,6 +2865,237 @@ def _serialize_solver_step(step: SolverStep) -> dict[str, object]:
     }
 
 
+def _normalize_point_id_list(raw_point_ids) -> list[str]:
+    if not isinstance(raw_point_ids, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw_point_ids:
+        point_id = str(value or "").strip()
+        if not point_id or point_id in seen:
+            continue
+        normalized.append(point_id)
+        seen.add(point_id)
+    return normalized
+
+
+def _scale_optional_float(value, scale: float) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed * scale
+
+
+def _scale_float_series(values, scale: float) -> list[float]:
+    if not isinstance(values, list):
+        return []
+    out: list[float] = []
+    for value in values:
+        scaled = _scale_optional_float(value, scale)
+        if scaled is None:
+            continue
+        out.append(scaled)
+    return out
+
+
+def _scale_point_displacement_trace(
+    raw_trace,
+    scale_mm_per_px: float,
+    point_ids: list[str],
+) -> dict[str, object]:
+    normalized_point_ids = list(point_ids or [])
+    point_history_mm: dict[str, list[float]] = {}
+    raw_history = (
+        raw_trace.get("point_displacement_by_iteration")
+        if isinstance(raw_trace, dict)
+        else {}
+    )
+    if not normalized_point_ids and isinstance(raw_history, dict):
+        normalized_point_ids = _normalize_point_id_list(list(raw_history.keys()))
+
+    for point_id in normalized_point_ids:
+        history = raw_history.get(point_id) if isinstance(raw_history, dict) else None
+        point_history_mm[point_id] = _scale_float_series(history, scale_mm_per_px)
+
+    final_point_displacement_mm: dict[str, float] = {}
+    raw_final_map = (
+        raw_trace.get("final_point_displacement")
+        if isinstance(raw_trace, dict)
+        else {}
+    )
+    for point_id in normalized_point_ids:
+        scaled = _scale_optional_float(
+            raw_final_map.get(point_id) if isinstance(raw_final_map, dict) else None,
+            scale_mm_per_px,
+        )
+        final_point_displacement_mm[point_id] = scaled if scaled is not None else 0.0
+
+    return {
+        "point_ids": normalized_point_ids,
+        "point_displacement_by_iteration_mm": point_history_mm,
+        "max_point_displacement_by_iteration_mm": _scale_float_series(
+            raw_trace.get("max_point_displacement_by_iteration")
+            if isinstance(raw_trace, dict)
+            else None,
+            scale_mm_per_px,
+        ),
+        "rms_point_displacement_by_iteration_mm": _scale_float_series(
+            raw_trace.get("rms_point_displacement_by_iteration")
+            if isinstance(raw_trace, dict)
+            else None,
+            scale_mm_per_px,
+        ),
+        "worst_point_id_by_iteration": (
+            list(raw_trace.get("worst_point_id_by_iteration") or [])
+            if isinstance(raw_trace, dict)
+            and isinstance(raw_trace.get("worst_point_id_by_iteration"), list)
+            else []
+        ),
+        "final_point_displacement_mm": final_point_displacement_mm,
+        "final_max_point_displacement_mm": (
+            _scale_optional_float(
+                raw_trace.get("final_max_point_displacement")
+                if isinstance(raw_trace, dict)
+                else None,
+                scale_mm_per_px,
+            )
+            or 0.0
+        ),
+        "final_rms_point_displacement_mm": (
+            _scale_optional_float(
+                raw_trace.get("final_rms_point_displacement")
+                if isinstance(raw_trace, dict)
+                else None,
+                scale_mm_per_px,
+            )
+            or 0.0
+        ),
+        "worst_point_id": (
+            str(raw_trace.get("worst_point_id") or "").strip()
+            if isinstance(raw_trace, dict)
+            else ""
+        ) or None,
+    }
+
+
+def _summarize_convergence_steps(convergence_steps: list[dict[str, object]]) -> dict[str, object]:
+    if not convergence_steps:
+        return {
+            "step_count": 0,
+            "max_iterations_used": 0,
+            "worst_step_index": None,
+            "worst_final_max_point_displacement_mm": 0.0,
+            "worst_final_rms_point_displacement_mm": 0.0,
+            "worst_point_id": None,
+        }
+
+    worst_step = max(
+        convergence_steps,
+        key=lambda step: float(step.get("final_max_point_displacement_mm", 0.0) or 0.0),
+    )
+    return {
+        "step_count": len(convergence_steps),
+        "max_iterations_used": max(
+            int(step.get("iterations_used", 0) or 0)
+            for step in convergence_steps
+        ),
+        "worst_step_index": int(worst_step.get("step_index", 0) or 0),
+        "worst_final_max_point_displacement_mm": max(
+            float(step.get("final_max_point_displacement_mm", 0.0) or 0.0)
+            for step in convergence_steps
+        ),
+        "worst_final_rms_point_displacement_mm": max(
+            float(step.get("final_rms_point_displacement_mm", 0.0) or 0.0)
+            for step in convergence_steps
+        ),
+        "worst_point_id": str(worst_step.get("worst_point_id") or "").strip() or None,
+    }
+
+
+def _build_scaled_linkage_convergence_payload(
+    raw_convergence,
+    scale_mm_per_px: float,
+    *,
+    trim_pre_steps: int = 0,
+) -> dict[str, object]:
+    if not isinstance(raw_convergence, dict):
+        return {}
+
+    free_point_ids = _normalize_point_id_list(raw_convergence.get("free_point_ids"))
+    raw_steps = raw_convergence.get("steps")
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+    trim_count = max(0, int(trim_pre_steps or 0))
+    trimmed_raw_steps = raw_steps[trim_count:] if trim_count > 0 else raw_steps
+
+    scaled_steps: list[dict[str, object]] = []
+    final_point_displacement_by_point_mm: dict[str, list[float]] = {
+        point_id: [] for point_id in free_point_ids
+    }
+
+    for seq_index, raw_step in enumerate(trimmed_raw_steps):
+        if not isinstance(raw_step, dict):
+            continue
+        scaled_trace = _scale_point_displacement_trace(
+            raw_step,
+            scale_mm_per_px,
+            free_point_ids,
+        )
+        final_point_map = scaled_trace.get("final_point_displacement_mm", {})
+        if isinstance(final_point_map, dict):
+            for point_id in free_point_ids:
+                final_point_displacement_by_point_mm.setdefault(point_id, []).append(
+                    float(final_point_map.get(point_id, 0.0) or 0.0)
+                )
+
+        scaled_steps.append(
+            {
+                "step_index": seq_index,
+                "shock_stroke_mm": _scale_optional_float(
+                    raw_step.get("shock_stroke"),
+                    scale_mm_per_px,
+                ),
+                "iterations_used": int(raw_step.get("iterations_used", 0) or 0),
+                **scaled_trace,
+            }
+        )
+
+    return {
+        "free_point_ids": free_point_ids,
+        "steps": scaled_steps,
+        "step_summaries": [
+            {
+                "step_index": int(step.get("step_index", 0) or 0),
+                "shock_stroke_mm": step.get("shock_stroke_mm"),
+                "iterations_used": int(step.get("iterations_used", 0) or 0),
+                "final_max_point_displacement_mm": float(
+                    step.get("final_max_point_displacement_mm", 0.0) or 0.0
+                ),
+                "final_rms_point_displacement_mm": float(
+                    step.get("final_rms_point_displacement_mm", 0.0) or 0.0
+                ),
+                "worst_point_id": step.get("worst_point_id"),
+            }
+            for step in scaled_steps
+        ],
+        "summary": _summarize_convergence_steps(scaled_steps),
+        "final_max_point_displacement_mm": [
+            float(step.get("final_max_point_displacement_mm", 0.0) or 0.0)
+            for step in scaled_steps
+        ],
+        "final_rms_point_displacement_mm": [
+            float(step.get("final_rms_point_displacement_mm", 0.0) or 0.0)
+            for step in scaled_steps
+        ],
+        "final_point_displacement_by_point_mm": final_point_displacement_by_point_mm,
+    }
+
+
 def _compute_variant_rest_pose(
     *,
     points: List[BikePoint],
@@ -2898,7 +3129,6 @@ def _compute_variant_rest_pose(
 
     rear_contact_y = float(rear_axle_point.y) + base_rear_radius_px
     front_contact_y = float(front_axle_point.y) + base_front_radius_px
-    ground_contact_y = rear_contact_y
 
     point_constraints = {
         str(point_id): {
@@ -2929,10 +3159,10 @@ def _compute_variant_rest_pose(
     if not has_fixed_body_driver:
         point_constraints.setdefault(str(bb_point.id), {})["x"] = float(bb_point.x)
     point_constraints.setdefault(str(rear_axle_point.id), {})["y"] = (
-        ground_contact_y - new_rear_radius_px
+        rear_contact_y - new_rear_radius_px
     )
     point_constraints.setdefault(str(front_axle_point.id), {})["y"] = (
-        ground_contact_y - new_front_radius_px
+        front_contact_y - new_front_radius_px
     )
     solved_points, debug = solve_bike_rest_pose(
         points,
@@ -2940,12 +3170,29 @@ def _compute_variant_rest_pose(
         point_constraints=point_constraints,
         iterations=max(200, iterations * 3),
     )
+    raw_pose_convergence = (
+        debug.get("convergence")
+        if isinstance(debug, dict)
+        else None
+    )
+    if isinstance(raw_pose_convergence, dict):
+        movable_point_ids = _normalize_point_id_list(
+            raw_pose_convergence.get("movable_point_ids")
+        )
+        scaled_pose_convergence = _scale_point_displacement_trace(
+            raw_pose_convergence,
+            scale_mm_per_px,
+            movable_point_ids,
+        )
+        scaled_pose_convergence["movable_point_ids"] = movable_point_ids
+        debug["convergence"] = scaled_pose_convergence
     debug.update(
         {
             "applied": True,
             "base_front_contact_y": front_contact_y,
             "base_rear_contact_y": rear_contact_y,
-            "base_ground_contact_y": ground_contact_y,
+            "target_front_axle_y": front_contact_y - new_front_radius_px,
+            "target_rear_axle_y": rear_contact_y - new_rear_radius_px,
         }
     )
     return solved_points, debug
@@ -3461,6 +3708,22 @@ def _pick_tangent_closest_to_reference_line(
     return ranked[0][2] if ranked else None
 
 
+def _pick_top_tangent(
+    candidates: list[tuple[tuple[float, float], tuple[float, float], float]],
+    endpoint: str,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    if not candidates:
+        return None
+    point_idx = 0 if endpoint == "p1" else 1
+    ranked: list[tuple[float, float, tuple[tuple[float, float], tuple[float, float]]]] = []
+    for p1, p2, score in candidates:
+        target = p1 if point_idx == 0 else p2
+        y = target[1] if math.isfinite(target[1]) else math.inf
+        ranked.append((y, score, (p1, p2)))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return ranked[0][2] if ranked else None
+
+
 def _build_drivetrain_force_segment(
     chainring_center: tuple[float, float],
     chainring_radius: float,
@@ -3477,24 +3740,10 @@ def _build_drivetrain_force_segment(
         and idler_radius > 0
     )
     if use_idler:
-        front_candidates = _compute_external_tangents(
-            chainring_center, chainring_radius, idler_center, idler_radius
-        )
         rear_candidates = _compute_external_tangents(
             idler_center, idler_radius, cassette_center, cassette_radius
         )
-        _front_segment = _pick_tangent_closest_to_reference_line(
-            front_candidates,
-            chainring_center,
-            cassette_center,
-            endpoint="p2",
-        )
-        rear_segment = _pick_tangent_closest_to_reference_line(
-            rear_candidates,
-            chainring_center,
-            cassette_center,
-            endpoint="p1",
-        )
+        rear_segment = _pick_top_tangent(rear_candidates, endpoint="p2")
         if rear_segment is not None:
             return rear_segment
         return None
@@ -4517,6 +4766,20 @@ async def compute_bike_kinematics(
                     "rectified": rectified,
                 }
             )
+    raw_linkage_convergence = (
+        result.debug.get("convergence")
+        if isinstance(result.debug, dict)
+        else None
+    )
+    linkage_convergence = _build_scaled_linkage_convergence_payload(
+        raw_linkage_convergence,
+        scale_mm_per_px,
+        trim_pre_steps=(
+            int(result.debug.get("pre_steps", 0) or 0)
+            if isinstance(result.debug, dict)
+            else 0
+        ),
+    )
     result.debug = {
         "perspective_mode": perspective_mode,
         "settings_found": settings_found,
@@ -4535,6 +4798,7 @@ async def compute_bike_kinematics(
         "point_count": len(points),
         "body_count": len(bodies),
         "rear_axle_steps": rear_axle_steps,
+        "convergence": linkage_convergence,
         "rear_brake_caliper_point_id": _pick_rear_brake_caliper_point_id(
             bodies,
             result.rear_axle_point_id,
@@ -4813,6 +5077,21 @@ async def compute_bike_kinematics(
         "rear_wheel_force_n_full": rear_wheel_force_n_full,
         "instant_center_coords_full": instant_center_coords_full,
         "rear_brake_caliper_point_id": brake_caliper_point_id,
+        "convergence_free_point_ids": linkage_convergence.get("free_point_ids", []),
+        "convergence_per_step": linkage_convergence.get("step_summaries", []),
+        "convergence_summary": linkage_convergence.get("summary", {}),
+        "convergence_final_max_point_displacement_mm": linkage_convergence.get(
+            "final_max_point_displacement_mm",
+            [],
+        ),
+        "convergence_final_rms_point_displacement_mm": linkage_convergence.get(
+            "final_rms_point_displacement_mm",
+            [],
+        ),
+        "convergence_final_point_displacement_by_point_mm": linkage_convergence.get(
+            "final_point_displacement_by_point_mm",
+            {},
+        ),
     }
 
     max_travel_trim = _extract_max_travel_from_relative_series(rear_axle_relative_mm)
@@ -4968,6 +5247,7 @@ async def get_cached_bike_kinematics(
             n_steps=0,
             driver_stroke=None,
             steps=[],
+            debug=None,
         )
 
     # Normalize a bit so the frontend always gets predictable fields
@@ -4977,6 +5257,7 @@ async def get_cached_bike_kinematics(
         driver_stroke=kin.get("driver_stroke"),
         steps=kin.get("steps") or [],
         scaled_outputs=kin.get("scaled_outputs"),
+        debug=kin.get("debug"),
     )
 
 
