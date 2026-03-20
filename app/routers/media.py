@@ -340,6 +340,9 @@ async def delete_hero_image(
     if not hero_id:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    media_doc = await media_items.find_one({"_id": hero_id, "bike_id": bike_oid}, {"bucket": 1})
+    bucket_name = media_doc.get("bucket", DEFAULT_BUCKET) if media_doc else DEFAULT_BUCKET
+
     base_prefix = f"users/{user_oid}/bikes/{bike_id}/images"
     hero_prefix = f"{base_prefix}/hero_"
 

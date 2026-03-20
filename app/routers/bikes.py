@@ -1747,6 +1747,35 @@ def _find_point(points: list[dict], ptype: str):
 
     return next((p for p in points if _point_type(p) == ptype), None)
 
+
+def _find_idler_point_id(points: list) -> Optional[str]:
+    def _point_type(point):
+        if isinstance(point, dict):
+            return point.get("type")
+        return getattr(point, "type", None)
+
+    def _point_name(point):
+        if isinstance(point, dict):
+            return point.get("name")
+        return getattr(point, "name", None)
+
+    for point in points or []:
+        ptype = str(_point_type(point) or "").strip().lower()
+        if ptype in {"idler", "idler_gear", "chain_idler", "pulley"}:
+            pid = point.get("id") if isinstance(point, dict) else getattr(point, "id", None)
+            pid_s = str(pid or "").strip()
+            if pid_s:
+                return pid_s
+    for point in points or []:
+        name = str(_point_name(point) or "").strip().lower()
+        if "idler" not in name:
+            continue
+        pid = point.get("id") if isinstance(point, dict) else getattr(point, "id", None)
+        pid_s = str(pid or "").strip()
+        if pid_s:
+            return pid_s
+    return None
+
 def _resolve_shock_segment(points: list[dict], bodies: list[dict]) -> tuple[dict, dict] | None:
     def _body_type(body):
         if isinstance(body, dict):
@@ -3222,27 +3251,27 @@ def _compute_rear_wheel_force_n_series(
     return out
 
 
-def _compute_top_external_tangent(
+def _compute_external_tangents(
     c1: tuple[float, float],
     r1: float,
     c2: tuple[float, float],
     r2: float,
-) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+) -> list[tuple[tuple[float, float], tuple[float, float], float]]:
     if not (r1 > 0 and r2 > 0):
-        return None
+        return []
     dx = c2[0] - c1[0]
     dy = c2[1] - c1[1]
     dist = math.hypot(dx, dy)
     if dist <= 1e-9:
-        return None
+        return []
     radius_delta = r2 - r1
     if dist <= abs(radius_delta) + 1e-6:
-        return None
+        return []
 
     a = radius_delta / dist
     b_sq = 1.0 - a * a
     if b_sq < 0:
-        return None
+        return []
     b = math.sqrt(max(0.0, b_sq))
     inv_dist = 1.0 / dist
     normals = [
@@ -3262,10 +3291,100 @@ def _compute_top_external_tangent(
         p2 = (c2[0] + nx * r2, c2[1] + ny * r2)
         score = p1[1] + p2[1]
         candidates.append((p1, p2, score))
+    return candidates
+
+
+def _compute_top_external_tangent(
+    c1: tuple[float, float],
+    r1: float,
+    c2: tuple[float, float],
+    r2: float,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    candidates = _compute_external_tangents(c1, r1, c2, r2)
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[2])
     return candidates[0][0], candidates[0][1]
+
+
+def _signed_distance_to_line(
+    point: tuple[float, float],
+    a: tuple[float, float],
+    b: tuple[float, float],
+) -> Optional[float]:
+    x, y = point
+    x1, y1 = a
+    x2, y2 = b
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 1e-9:
+        return None
+    return ((x - x1) * dy - (y - y1) * dx) / length
+
+
+def _pick_tangent_closest_to_reference_line(
+    candidates: list[tuple[tuple[float, float], tuple[float, float], float]],
+    reference_a: tuple[float, float],
+    reference_b: tuple[float, float],
+    endpoint: str,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    if not candidates:
+        return None
+    point_idx = 0 if endpoint == "p1" else 1
+    ranked: list[tuple[float, float, tuple[tuple[float, float], tuple[float, float]]]] = []
+    for p1, p2, score in candidates:
+        target = p1 if point_idx == 0 else p2
+        distance = _signed_distance_to_line(target, reference_a, reference_b)
+        abs_distance = abs(distance) if distance is not None and math.isfinite(distance) else math.inf
+        ranked.append((abs_distance, score, (p1, p2)))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return ranked[0][2] if ranked else None
+
+
+def _build_drivetrain_force_segment(
+    chainring_center: tuple[float, float],
+    chainring_radius: float,
+    cassette_center: tuple[float, float],
+    cassette_radius: float,
+    idler_center: Optional[tuple[float, float]] = None,
+    idler_radius: Optional[float] = None,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    use_idler = (
+        idler_center is not None
+        and idler_radius is not None
+        and math.isfinite(idler_center[0])
+        and math.isfinite(idler_center[1])
+        and idler_radius > 0
+    )
+    if use_idler:
+        front_candidates = _compute_external_tangents(
+            chainring_center, chainring_radius, idler_center, idler_radius
+        )
+        rear_candidates = _compute_external_tangents(
+            idler_center, idler_radius, cassette_center, cassette_radius
+        )
+        _front_segment = _pick_tangent_closest_to_reference_line(
+            front_candidates,
+            chainring_center,
+            cassette_center,
+            endpoint="p2",
+        )
+        rear_segment = _pick_tangent_closest_to_reference_line(
+            rear_candidates,
+            chainring_center,
+            cassette_center,
+            endpoint="p1",
+        )
+        if rear_segment is not None:
+            return rear_segment
+        return None
+    return _compute_top_external_tangent(
+        chainring_center,
+        chainring_radius,
+        cassette_center,
+        cassette_radius,
+    )
 
 
 def _intersect_infinite_lines(
@@ -3330,6 +3449,7 @@ def _compute_anti_squat_series(
     rear_axle_point_id: Optional[str],
     front_axle_point_id: Optional[str],
     bb_point_id: Optional[str],
+    idler_point_id: Optional[str],
     scale_mm_per_px: float,
     settings: dict,
 ) -> list[Optional[float]]:
@@ -3344,10 +3464,12 @@ def _compute_anti_squat_series(
     cassette_teeth = _parse_positive_int(settings.get("drivetrain_cassette_teeth"))
     if not chainring_teeth or not cassette_teeth:
         return []
+    idler_teeth = _parse_positive_int(settings.get("drivetrain_idler_teeth"))
     chainring_radius_mm = _get_sprocket_pitch_radius_mm(chainring_teeth)
     cassette_radius_mm = _get_sprocket_pitch_radius_mm(cassette_teeth)
     if not chainring_radius_mm or not cassette_radius_mm:
         return []
+    idler_radius_mm = _get_sprocket_pitch_radius_mm(idler_teeth) if idler_teeth else None
 
     rear_wheel_size = str(settings.get("rear_wheel_size", "29"))
     front_wheel_size = str(settings.get("front_wheel_size", "29"))
@@ -3374,6 +3496,7 @@ def _compute_anti_squat_series(
 
     chainring_radius_px = chainring_radius_mm / scale_mm_per_px
     cassette_radius_px = cassette_radius_mm / scale_mm_per_px
+    idler_radius_px = idler_radius_mm / scale_mm_per_px if idler_radius_mm else None
     rear_wheel_radius_px = rear_wheel_radius_mm / scale_mm_per_px
     front_wheel_radius_px = front_wheel_radius_mm / scale_mm_per_px
 
@@ -3384,6 +3507,7 @@ def _compute_anti_squat_series(
         rear = step.points.get(rear_axle_point_id)
         front = step.points.get(front_axle_point_id)
         bb = step.points.get(bb_point_id)
+        idler = step.points.get(idler_point_id) if idler_point_id else None
         if not rear or not front or not bb:
             series.append(None)
             continue
@@ -3437,13 +3561,23 @@ def _compute_anti_squat_series(
         rear_lvl = _rotate_about_anchor(rear_xy, rear_contact, cos_t, sin_t)
         front_lvl = _rotate_about_anchor(front_xy, rear_contact, cos_t, sin_t)
         bb_lvl = _rotate_about_anchor(bb_xy, rear_contact, cos_t, sin_t)
+        idler_lvl = (
+            _rotate_about_anchor((float(idler[0]), float(idler[1])), rear_contact, cos_t, sin_t)
+            if idler and idler_radius_px
+            else None
+        )
         ic_lvl = _rotate_about_anchor(ic_xy, rear_contact, cos_t, sin_t)
         cg_lvl = _rotate_about_anchor(combined_cg, rear_contact, cos_t, sin_t)
         rear_contact_lvl = _rotate_about_anchor(rear_contact, rear_contact, cos_t, sin_t)
         front_contact_lvl = _rotate_about_anchor(front_contact, rear_contact, cos_t, sin_t)
 
-        tangent = _compute_top_external_tangent(
-            bb_lvl, chainring_radius_px, rear_lvl, cassette_radius_px
+        tangent = _build_drivetrain_force_segment(
+            bb_lvl,
+            chainring_radius_px,
+            rear_lvl,
+            cassette_radius_px,
+            idler_center=idler_lvl,
+            idler_radius=idler_radius_px,
         )
         if tangent is None:
             series.append(None)
@@ -4282,6 +4416,7 @@ async def compute_bike_kinematics(
     trim_index = 0
     front_axle_point_id = next((p.id for p in points if p.type == "front_axle"), None)
     bb_point_id = next((p.id for p in points if p.type in ("bb", "bottom_bracket")), None)
+    idler_point_id = _find_idler_point_id(points)
     preferred_rear_brake_ic_body_id = str(settings.get("rear_brake_ic_body_id") or "")
     brake_caliper_point_id = _pick_rear_brake_caliper_point_id(
         bodies,
@@ -4424,6 +4559,7 @@ async def compute_bike_kinematics(
             rear_axle_point_id=result.rear_axle_point_id,
             front_axle_point_id=front_axle_point_id,
             bb_point_id=bb_point_id,
+            idler_point_id=idler_point_id,
             scale_mm_per_px=scale_mm_per_px,
             settings=settings,
         )
@@ -4434,6 +4570,7 @@ async def compute_bike_kinematics(
             rear_axle_point_id=result.rear_axle_point_id,
             front_axle_point_id=front_axle_point_id,
             bb_point_id=bb_point_id,
+            idler_point_id=idler_point_id,
             scale_mm_per_px=scale_mm_per_px,
             settings=settings,
         )

@@ -12,7 +12,7 @@ from app.db import sheds_col, bikes_col#, media_items_col
 from app.routers.auth import get_current_user
 from app.routers.bikes import BikeOut, bike_doc_to_out  # reuse existing models
 # from app.storage import generate_signed_url
-from app.utils_media import resolve_hero_url
+from app.utils_media import resolve_hero_url, resolve_hero_variant_url
 
 router = APIRouter(prefix="/sheds", tags=["sheds"])
 SHED_MAX_BIKES = 6
@@ -42,6 +42,7 @@ class ShedOut(BaseModel):
     is_featured: bool
     bike_ids: List[str]
     bike_count: int          # <-- added for frontend
+    preview_bikes: List[dict] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -58,18 +59,69 @@ def shed_doc_to_out(doc) -> ShedOut:
         is_featured=bool(doc.get("is_featured", False)),
         bike_ids=[str(bid) for bid in bike_ids],
         bike_count=len(bike_ids),
+        preview_bikes=[],
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
 
-async def _existing_bike_count_for_ids(bike_ids: List[ObjectId]) -> int:
-    if not bike_ids:
-        return 0
-    bikes = bikes_col()
-    try:
-        return int(await bikes.count_documents({"_id": {"$in": bike_ids}}))
-    except Exception:
-        return 0
+
+async def _build_shed_preview_payloads(
+    shed_docs: List[dict],
+) -> tuple[dict[str, int], dict[str, List[dict]]]:
+    if not shed_docs:
+        return {}, {}
+
+    shed_bike_ids: dict[str, List[ObjectId]] = {}
+    all_ids: list[ObjectId] = []
+    seen_ids: set[ObjectId] = set()
+
+    for doc in shed_docs:
+        shed_key = str(doc.get("_id"))
+        bike_ids = [bid for bid in (doc.get("bike_ids") or []) if isinstance(bid, ObjectId)]
+        shed_bike_ids[shed_key] = bike_ids
+        for bike_id in bike_ids:
+            if bike_id in seen_ids:
+                continue
+            seen_ids.add(bike_id)
+            all_ids.append(bike_id)
+
+    if not all_ids:
+        empty_counts = {shed_key: 0 for shed_key in shed_bike_ids.keys()}
+        empty_previews = {shed_key: [] for shed_key in shed_bike_ids.keys()}
+        return empty_counts, empty_previews
+
+    bike_docs = await bikes_col().find({"_id": {"$in": all_ids}}).to_list(length=len(all_ids))
+    bike_by_id = {doc["_id"]: doc for doc in bike_docs if doc.get("_id") is not None}
+
+    preview_by_bike_id: dict[ObjectId, dict] = {}
+    for bike_id, bike_doc in bike_by_id.items():
+        hero_id = bike_doc.get("hero_media_id")
+        hero_thumb_url = await resolve_hero_variant_url(hero_id, "low")
+        hero_url = await resolve_hero_url(hero_id)
+        brand = str(bike_doc.get("brand") or "").strip() or "Unknown brand"
+        model = str(bike_doc.get("name") or "").strip() or "Untitled"
+        year_raw = bike_doc.get("model_year")
+        year = str(year_raw).strip() if year_raw is not None else ""
+        label = " | ".join([brand, model, year or "n/a"])
+        preview_by_bike_id[bike_id] = {
+            "id": str(bike_id),
+            "name": label,
+            "hero_url": hero_url or "",
+            "hero_thumb_url": hero_thumb_url or "",
+        }
+
+    bike_count_by_shed: dict[str, int] = {}
+    preview_bikes_by_shed: dict[str, List[dict]] = {}
+    for shed_key, bike_ids in shed_bike_ids.items():
+        existing_ids = [bike_id for bike_id in bike_ids if bike_id in bike_by_id]
+        bike_count_by_shed[shed_key] = len(existing_ids)
+        preview_bikes_by_shed[shed_key] = [
+            preview_by_bike_id[bike_id]
+            for bike_id in existing_ids[:SHED_MAX_BIKES]
+            if bike_id in preview_by_bike_id
+        ]
+
+    return bike_count_by_shed, preview_bikes_by_shed
 
 
 def _extract_user_oid(current_user) -> ObjectId:
@@ -135,11 +187,13 @@ async def list_my_sheds(current_user=Depends(get_current_user)):
     sheds = sheds_col()
     cursor = sheds.find({"owner_id": owner_oid}).sort("created_at", 1)
     docs = await cursor.to_list(length=1000)
+    bike_count_by_shed, preview_bikes_by_shed = await _build_shed_preview_payloads(docs)
     out: List[ShedOut] = []
     for d in docs:
+        shed_key = str(d.get("_id"))
         model = shed_doc_to_out(d)
-        bike_ids = d.get("bike_ids", []) or []
-        model.bike_count = await _existing_bike_count_for_ids(bike_ids)
+        model.bike_count = bike_count_by_shed.get(shed_key, 0)
+        model.preview_bikes = preview_bikes_by_shed.get(shed_key, [])
         out.append(model)
     return out
 
@@ -164,9 +218,11 @@ async def get_shed(
     if doc.get("owner_id") != owner_oid:
         raise HTTPException(status_code=403, detail="Not your shed")
 
+    bike_count_by_shed, preview_bikes_by_shed = await _build_shed_preview_payloads([doc])
     model = shed_doc_to_out(doc)
-    bike_ids = doc.get("bike_ids", []) or []
-    model.bike_count = await _existing_bike_count_for_ids(bike_ids)
+    shed_key = str(doc.get("_id"))
+    model.bike_count = bike_count_by_shed.get(shed_key, 0)
+    model.preview_bikes = preview_bikes_by_shed.get(shed_key, [])
     return model
 
 
