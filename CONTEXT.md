@@ -74,8 +74,8 @@ Example result fields:
 - axle_x, axle_y
 - instant_center (future)
 - solver convergence diagnostics:
-  - per-step non-fixed-point displacement histories in `debug`
-  - compact convergence summary series in `scaled_outputs`
+  - a single scalar convergence metric per iteration/step in live debug output
+  - a compact per-step convergence series in `scaled_outputs`
 
 ## API Design
 

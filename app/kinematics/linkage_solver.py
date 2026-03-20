@@ -248,47 +248,46 @@ def _rigid_pairs(point_ids: list[str], closed: bool) -> list[tuple[str, str]]:
             pairs.append((a, pids[j]))
     return pairs
 
-
-def _rms(values: List[float]) -> float:
-    if not values:
-        return 0.0
-    return math.sqrt(sum(value * value for value in values) / len(values))
-
-
-def _collect_point_displacement_snapshot(
+def _max_point_displacement(
     points: List[BikePoint],
     point_indices: List[int],
     previous_x: List[float],
     previous_y: List[float],
     current_x: List[float],
     current_y: List[float],
-) -> Dict[str, Any]:
-    point_displacements: Dict[str, float] = {}
-    displacement_values: List[float] = []
-    worst_point_id: Optional[str] = None
-    worst_point_displacement = 0.0
+) -> float:
+    max_displacement = 0.0
 
     for point_idx in point_indices:
         if point_idx < 0 or point_idx >= len(points):
             continue
-        point_id = str(points[point_idx].id or "").strip()
-        if not point_id:
-            continue
         dx = float(current_x[point_idx]) - float(previous_x[point_idx])
         dy = float(current_y[point_idx]) - float(previous_y[point_idx])
         displacement = math.hypot(dx, dy)
-        point_displacements[point_id] = displacement
-        displacement_values.append(displacement)
-        if displacement > worst_point_displacement:
-            worst_point_displacement = displacement
-            worst_point_id = point_id
+        if displacement > max_displacement:
+            max_displacement = displacement
 
-    return {
-        "point_displacements": point_displacements,
-        "max_point_displacement": worst_point_displacement,
-        "rms_point_displacement": _rms(displacement_values),
-        "worst_point_id": worst_point_id,
-    }
+    return max_displacement
+
+
+def _max_point_displacement_from_position_maps(
+    previous_positions: Dict[str, Tuple[float, float]],
+    current_positions: Dict[str, Tuple[float, float]],
+    point_ids: List[str],
+) -> float:
+    max_displacement = 0.0
+    for point_id in point_ids:
+        previous = previous_positions.get(point_id)
+        current = current_positions.get(point_id)
+        if previous is None or current is None:
+            continue
+        displacement = math.hypot(
+            float(current[0]) - float(previous[0]),
+            float(current[1]) - float(previous[1]),
+        )
+        if displacement > max_displacement:
+            max_displacement = displacement
+    return max_displacement
 
 # ------------ Core PBD solver ------------
 
@@ -374,32 +373,21 @@ def _solve_with_edges(
         final_projection_passes: int = 3,
     ) -> Dict[str, Any]:
         target_shock_len = driver_L0 - s  # shorten shock with positive stroke
-        point_history_by_id: Dict[str, List[float]] = {
-            point_id: [] for point_id in free_point_ids
-        }
-        max_history: List[float] = []
-        rms_history: List[float] = []
-        worst_point_id_history: List[Optional[str]] = []
+        value_by_iteration: List[float] = []
         iterations_used = 0
 
         def _record_iteration(previous_x: List[float], previous_y: List[float]) -> None:
             nonlocal iterations_used
-            snapshot = _collect_point_displacement_snapshot(
-                points,
-                free_point_indices,
-                previous_x,
-                previous_y,
-                state_x,
-                state_y,
-            )
-            point_displacements = snapshot.get("point_displacements", {})
-            for point_id in free_point_ids:
-                point_history_by_id.setdefault(point_id, []).append(
-                    float(point_displacements.get(point_id, 0.0))
+            value_by_iteration.append(
+                _max_point_displacement(
+                    points,
+                    free_point_indices,
+                    previous_x,
+                    previous_y,
+                    state_x,
+                    state_y,
                 )
-            max_history.append(float(snapshot.get("max_point_displacement", 0.0) or 0.0))
-            rms_history.append(float(snapshot.get("rms_point_displacement", 0.0) or 0.0))
-            worst_point_id_history.append(snapshot.get("worst_point_id"))
+            )
             iterations_used += 1
 
         solve_iterations = max(1, int(iterations_override or iterations))
@@ -461,36 +449,13 @@ def _solve_with_edges(
             _apply_axis_constraints(state_x, state_y)
             _record_iteration(previous_x, previous_y)
 
-        final_point_displacements = {
-            point_id: (
-                float(history[-1])
-                if isinstance(history, list) and history
-                else 0.0
-            )
-            for point_id, history in point_history_by_id.items()
-        }
-        worst_point_id = None
-        worst_point_displacement = 0.0
-        for point_id, displacement in final_point_displacements.items():
-            if displacement > worst_point_displacement:
-                worst_point_displacement = displacement
-                worst_point_id = point_id
-
         return {
             "iterations_used": iterations_used,
-            "point_displacement_by_iteration": point_history_by_id,
-            "max_point_displacement_by_iteration": max_history,
-            "rms_point_displacement_by_iteration": rms_history,
-            "worst_point_id_by_iteration": worst_point_id_history,
-            "final_point_displacement": final_point_displacements,
-            "final_max_point_displacement": (
-                float(max_history[-1]) if max_history else 0.0
+            "value_metric": "max_point_displacement",
+            "value_by_iteration": value_by_iteration,
+            "final_value": (
+                float(value_by_iteration[-1]) if value_by_iteration else 0.0
             ),
-            "final_rms_point_displacement": (
-                float(rms_history[-1]) if rms_history else 0.0
-            ),
-            "worst_point_id": worst_point_id,
-            "worst_point_displacement": worst_point_displacement,
         }
 
     def _build_step_from_state(
@@ -532,12 +497,6 @@ def _solve_with_edges(
     # Rear axle initial vertical position
     rear_y0 = y0[rear_axle_idx] if rear_axle_idx is not None else None
     free_point_indices = [idx for idx, is_fixed in enumerate(fixed) if not is_fixed]
-    free_point_ids = [
-        str(points[idx].id or "")
-        for idx in free_point_indices
-        if str(points[idx].id or "")
-    ]
-
     steps: List[SolverStep] = []
     convergence_steps: List[Dict[str, Any]] = []
     n_steps = max(1, n_steps)
@@ -625,7 +584,7 @@ def _solve_with_edges(
             if 0 <= idx < len(points)
         },
         "convergence": {
-            "free_point_ids": free_point_ids,
+            "metric": "max_point_displacement",
             "steps": convergence_steps,
             "summary": {
                 "step_count": len(convergence_steps),
@@ -641,7 +600,7 @@ def _solve_with_edges(
                     max(
                         (
                             (
-                                float(step.get("final_max_point_displacement", 0.0) or 0.0),
+                                float(step.get("final_value", 0.0) or 0.0),
                                 int(step.get("step_index", 0) or 0),
                             )
                             for step in convergence_steps
@@ -652,35 +611,13 @@ def _solve_with_edges(
                     if convergence_steps
                     else None
                 ),
-                "worst_final_max_point_displacement": max(
+                "worst_final_value": max(
                     (
-                        float(step.get("final_max_point_displacement", 0.0) or 0.0)
+                        float(step.get("final_value", 0.0) or 0.0)
                         for step in convergence_steps
                         if isinstance(step, dict)
                     ),
                     default=0.0,
-                ),
-                "worst_final_rms_point_displacement": max(
-                    (
-                        float(step.get("final_rms_point_displacement", 0.0) or 0.0)
-                        for step in convergence_steps
-                        if isinstance(step, dict)
-                    ),
-                    default=0.0,
-                ),
-                "worst_point_id": (
-                    max(
-                        (
-                            (
-                                float(step.get("final_max_point_displacement", 0.0) or 0.0),
-                                str(step.get("worst_point_id") or ""),
-                            )
-                            for step in convergence_steps
-                            if isinstance(step, dict)
-                        ),
-                        default=(0.0, ""),
-                    )[1]
-                    or None
                 ),
             },
         },
@@ -915,12 +852,7 @@ def solve_bike_rest_pose(
             and constraints_by_id.get(point_id, {}).get("y") is not None
         )
     ]
-    point_displacement_by_iteration: Dict[str, List[float]] = {
-        point_id: [] for point_id in movable_point_ids
-    }
-    max_point_displacement_by_iteration: List[float] = []
-    rms_point_displacement_by_iteration: List[float] = []
-    worst_point_id_by_iteration: List[Optional[str]] = []
+    value_by_iteration: List[float] = []
     for _ in range(max(1, iterations)):
         iterations_used += 1
         predicted_by_point: Dict[str, List[Tuple[float, float]]] = {}
@@ -960,32 +892,13 @@ def solve_bike_rest_pose(
             max_step_delta = max(max_step_delta, math.hypot(dx, dy))
             next_positions[point_id] = (avg_x, avg_y)
 
-        point_displacements: Dict[str, float] = {}
-        displacement_values: List[float] = []
-        worst_point_id: Optional[str] = None
-        worst_point_displacement = 0.0
-        for point_id in movable_point_ids:
-            current_position = current_positions.get(point_id)
-            next_position = next_positions.get(point_id)
-            if current_position is None or next_position is None:
-                continue
-            displacement = math.hypot(
-                float(next_position[0]) - float(current_position[0]),
-                float(next_position[1]) - float(current_position[1]),
+        value_by_iteration.append(
+            _max_point_displacement_from_position_maps(
+                current_positions,
+                next_positions,
+                movable_point_ids,
             )
-            point_displacements[point_id] = displacement
-            displacement_values.append(displacement)
-            if displacement > worst_point_displacement:
-                worst_point_displacement = displacement
-                worst_point_id = point_id
-
-        for point_id in movable_point_ids:
-            point_displacement_by_iteration.setdefault(point_id, []).append(
-                float(point_displacements.get(point_id, 0.0))
-            )
-        max_point_displacement_by_iteration.append(worst_point_displacement)
-        rms_point_displacement_by_iteration.append(_rms(displacement_values))
-        worst_point_id_by_iteration.append(worst_point_id)
+        )
 
         current_positions = next_positions
         if max_step_delta <= 1e-6 and max_body_fit_error <= 1e-6:
@@ -1018,33 +931,10 @@ def solve_bike_rest_pose(
         "body_count": len(body_models),
         "body_ids": [str(body_model.get("id") or "") for body_model in body_models],
         "convergence": {
-            "movable_point_ids": movable_point_ids,
-            "point_displacement_by_iteration": point_displacement_by_iteration,
-            "max_point_displacement_by_iteration": max_point_displacement_by_iteration,
-            "rms_point_displacement_by_iteration": rms_point_displacement_by_iteration,
-            "worst_point_id_by_iteration": worst_point_id_by_iteration,
-            "final_point_displacement": {
-                point_id: (
-                    float(history[-1])
-                    if isinstance(history, list) and history
-                    else 0.0
-                )
-                for point_id, history in point_displacement_by_iteration.items()
-            },
-            "final_max_point_displacement": (
-                float(max_point_displacement_by_iteration[-1])
-                if max_point_displacement_by_iteration
-                else 0.0
-            ),
-            "final_rms_point_displacement": (
-                float(rms_point_displacement_by_iteration[-1])
-                if rms_point_displacement_by_iteration
-                else 0.0
-            ),
-            "worst_point_id": (
-                worst_point_id_by_iteration[-1]
-                if worst_point_id_by_iteration
-                else None
+            "metric": "max_point_displacement",
+            "value_by_iteration": value_by_iteration,
+            "final_value": (
+                float(value_by_iteration[-1]) if value_by_iteration else 0.0
             ),
         },
     }
