@@ -3000,39 +3000,79 @@ def _build_scaled_linkage_convergence_payload(
     }
 
 
-def _compute_variant_rest_pose(
+def _derive_ground_reference_from_base_pose(
     *,
     points: List[BikePoint],
-    bodies: List[RigidBody],
     scale_mm_per_px: float,
     base_settings: dict,
-    effective_settings: dict,
-    iterations: int,
-    override_point_constraints: Optional[dict[str, dict[str, float]]] = None,
-) -> tuple[List[BikePoint], dict]:
+) -> tuple[Optional[dict[str, float | str]], Optional[str]]:
     if not (scale_mm_per_px > 0):
-        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
+        return None, "invalid_scale"
 
     bb_point = next((p for p in points if p.type in ("bb", "bottom_bracket")), None)
     rear_axle_point = next((p for p in points if p.type == "rear_axle"), None)
     front_axle_point = next((p for p in points if p.type == "front_axle"), None)
     if not bb_point or not rear_axle_point or not front_axle_point:
-        return points, {"mode": "rest_pose", "applied": False, "reason": "missing_anchor_points"}
+        return None, "missing_anchor_points"
 
     base_rear_radius_mm = _get_wheel_outer_radius_mm(base_settings.get("rear_wheel_size", "29"))
     base_front_radius_mm = _get_wheel_outer_radius_mm(base_settings.get("front_wheel_size", "29"))
-    new_rear_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("rear_wheel_size", "29"))
-    new_front_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("front_wheel_size", "29"))
-    if not base_rear_radius_mm or not base_front_radius_mm or not new_rear_radius_mm or not new_front_radius_mm:
-        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_wheel_sizes"}
+    if not base_rear_radius_mm or not base_front_radius_mm:
+        return None, "invalid_base_wheel_sizes"
 
     base_rear_radius_px = base_rear_radius_mm / scale_mm_per_px
     base_front_radius_px = base_front_radius_mm / scale_mm_per_px
+
+    return (
+        {
+            "source": "authored_base_pose",
+            "bb_point_id": str(bb_point.id),
+            "bb_x": float(bb_point.x),
+            "rear_axle_point_id": str(rear_axle_point.id),
+            "front_axle_point_id": str(front_axle_point.id),
+            "base_rear_radius_px": float(base_rear_radius_px),
+            "base_front_radius_px": float(base_front_radius_px),
+            "rear_contact_y": float(rear_axle_point.y) + base_rear_radius_px,
+            "front_contact_y": float(front_axle_point.y) + base_front_radius_px,
+        },
+        None,
+    )
+
+
+def _compute_variant_rest_pose(
+    *,
+    points: List[BikePoint],
+    bodies: List[RigidBody],
+    scale_mm_per_px: float,
+    effective_settings: dict,
+    ground_reference: Optional[dict[str, float | str]],
+    iterations: int,
+    override_point_constraints: Optional[dict[str, dict[str, float]]] = None,
+) -> tuple[List[BikePoint], dict]:
+    if not (scale_mm_per_px > 0):
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_scale"}
+    if not isinstance(ground_reference, dict):
+        return points, {"mode": "rest_pose", "applied": False, "reason": "missing_ground_reference"}
+
+    bb_point_id = str(ground_reference.get("bb_point_id") or "").strip()
+    rear_axle_point_id = str(ground_reference.get("rear_axle_point_id") or "").strip()
+    front_axle_point_id = str(ground_reference.get("front_axle_point_id") or "").strip()
+    try:
+        bb_x = float(ground_reference.get("bb_x"))
+        rear_contact_y = float(ground_reference.get("rear_contact_y"))
+        front_contact_y = float(ground_reference.get("front_contact_y"))
+    except (TypeError, ValueError):
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_ground_reference"}
+    if not bb_point_id or not rear_axle_point_id or not front_axle_point_id:
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_ground_reference"}
+
+    new_rear_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("rear_wheel_size", "29"))
+    new_front_radius_mm = _get_wheel_outer_radius_mm(effective_settings.get("front_wheel_size", "29"))
+    if not new_rear_radius_mm or not new_front_radius_mm:
+        return points, {"mode": "rest_pose", "applied": False, "reason": "invalid_effective_wheel_sizes"}
+
     new_rear_radius_px = new_rear_radius_mm / scale_mm_per_px
     new_front_radius_px = new_front_radius_mm / scale_mm_per_px
-
-    rear_contact_y = float(rear_axle_point.y) + base_rear_radius_px
-    front_contact_y = float(front_axle_point.y) + base_front_radius_px
 
     point_constraints = {
         str(point_id): {
@@ -3056,16 +3096,11 @@ def _compute_variant_rest_pose(
             if point_id_str:
                 fixed_body_point_ids.add(point_id_str)
 
-    has_fixed_body_driver = any(
-        point_id in fixed_body_point_ids and isinstance(constraint, dict) and constraint
-        for point_id, constraint in (point_constraints or {}).items()
-    )
-    if not has_fixed_body_driver:
-        point_constraints.setdefault(str(bb_point.id), {})["x"] = float(bb_point.x)
-    point_constraints.setdefault(str(rear_axle_point.id), {})["y"] = (
+    point_constraints.setdefault(bb_point_id, {})["x"] = bb_x
+    point_constraints.setdefault(rear_axle_point_id, {})["y"] = (
         rear_contact_y - new_rear_radius_px
     )
-    point_constraints.setdefault(str(front_axle_point.id), {})["y"] = (
+    point_constraints.setdefault(front_axle_point_id, {})["y"] = (
         front_contact_y - new_front_radius_px
     )
     solved_points, debug = solve_bike_rest_pose(
@@ -3088,6 +3123,7 @@ def _compute_variant_rest_pose(
     debug.update(
         {
             "applied": True,
+            "ground_reference_source": str(ground_reference.get("source") or "authored_base_pose"),
             "base_front_contact_y": front_contact_y,
             "base_rear_contact_y": rear_contact_y,
             "target_front_axle_y": front_contact_y - new_front_radius_px,
@@ -4447,6 +4483,12 @@ async def compute_bike_kinematics(
             float(mm_value),
         )
 
+    ground_reference, ground_reference_error = _derive_ground_reference_from_base_pose(
+        points=points,
+        scale_mm_per_px=scale_mm_per_px,
+        base_settings=base_settings,
+    )
+
     # ---- Apply overrides to authored bodies and prepare solver-only bodies ----
     authored_bodies = _apply_variant_overrides_to_bodies(bodies, variant_overrides, scale_mm_per_px)
     solver_bodies = _solver_rigid_bodies_only(authored_bodies)
@@ -4476,8 +4518,8 @@ async def compute_bike_kinematics(
             points=points,
             bodies=solver_bodies,
             scale_mm_per_px=scale_mm_per_px,
-            base_settings=base_settings,
             effective_settings=settings,
+            ground_reference=ground_reference,
             iterations=iterations,
             override_point_constraints=rest_pose_constraints,
         )
@@ -4485,6 +4527,12 @@ async def compute_bike_kinematics(
         pose_debug = {"mode": "rest_pose", "applied": False, "reason": "variant_no_pose_delta"}
     else:
         pose_debug = {"mode": "rest_pose", "applied": False, "reason": "base_bike"}
+
+    if not pose_debug.get("applied") and ground_reference_error:
+        pose_debug = {
+            **pose_debug,
+            "ground_reference_error": ground_reference_error,
+        }
 
     shock_length0_px = _resolve_shock_length0_px(points, solver_bodies, geom, scale_mm_per_px)
     if shock_length0_px is not None:
