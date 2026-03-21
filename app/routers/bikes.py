@@ -2759,9 +2759,19 @@ def _compute_sag_payload(
                     pressure_debug["required_pressure_psi"] = required_pressure_psi
 
     if isinstance(debug_out, dict):
+        shock_settings_debug: dict[str, object] = {}
+        for key, value in shock_model.items():
+            if isinstance(value, dict):
+                continue
+            parsed = _parse_optional_finite(value)
+            if parsed is not None:
+                shock_settings_debug[key] = float(parsed)
+            elif value is not None:
+                shock_settings_debug[key] = value
         debug_out.update(
             {
                 "shock_type": shock_type,
+                "shock_settings": shock_settings_debug,
                 "target_shock_sag_pct": target_sag_pct,
                 "rider_mass_kg": rider_mass_kg,
                 "bike_mass_kg": bike_mass_kg,
@@ -5424,6 +5434,7 @@ async def compute_bike_kinematics(
         "[SagDebug] "
         f"bike={bike_id} variant={str(variant_doc.get('_id')) if variant_doc else 'base'} "
         f"shock_type={sag_debug.get('shock_type')} "
+        f"shock_settings={sag_debug.get('shock_settings')} "
         f"target_sag_pct={sag_debug.get('target_shock_sag_pct')} "
         f"rider_mass_kg={sag_debug.get('rider_mass_kg')} "
         f"bike_mass_kg={sag_debug.get('bike_mass_kg')} "
