@@ -2609,6 +2609,7 @@ def _compute_sag_payload(
     shock_type: str,
     shock_model: dict[str, object],
     shock_stroke_series_mm: list[Optional[float]],
+    shock_force_n_series: list[Optional[float]],
     leverage_ratio_series: list[Optional[float]],
     rear_axle_relative_mm: list[list[float]],
     rear_wheel_force_n_series: list[Optional[float]],
@@ -2669,13 +2670,33 @@ def _compute_sag_payload(
         else None
     )
 
+    leverage_ratio_at_sag = (
+        _interpolate_series_value_at_target(
+            shock_stroke_series_mm,
+            leverage_ratio_series,
+            float(target_stroke_mm),
+        )
+        if target_stroke_mm is not None
+        else None
+    )
+
+    shock_force_at_sag_n = (
+        _interpolate_series_value_at_target(
+            shock_stroke_series_mm,
+            shock_force_n_series,
+            float(target_stroke_mm),
+        )
+        if target_stroke_mm is not None
+        else None
+    )
+
     rear_wheel_force_at_sag_n = (
         _interpolate_series_value_at_target(
-            rear_travel_series_mm,
+            shock_stroke_series_mm,
             rear_wheel_force_n_series,
-            float(rear_sag_travel_mm),
+            float(target_stroke_mm),
         )
-        if rear_sag_travel_mm is not None
+        if target_stroke_mm is not None
         else None
     )
 
@@ -2684,6 +2705,8 @@ def _compute_sag_payload(
         "target_rear_force_n": target_rear_force_n,
         "target_stroke_mm": target_stroke_mm,
         "rear_sag_travel_mm": rear_sag_travel_mm,
+        "leverage_ratio_at_sag": leverage_ratio_at_sag,
+        "shock_force_at_sag_n": shock_force_at_sag_n,
         "rear_wheel_force_at_sag_n": rear_wheel_force_at_sag_n,
         "force_at_0_psi_n": None,
         "force_at_100_psi_n": None,
@@ -2754,6 +2777,8 @@ def _compute_sag_payload(
         "target_shock_sag_pct": target_sag_pct,
         "shock_stroke_mm": target_stroke_mm,
         "rear_sag_travel_mm": rear_sag_travel_mm,
+        "leverage_ratio_at_sag": leverage_ratio_at_sag,
+        "shock_force_at_sag_n": shock_force_at_sag_n,
         "rear_wheel_force_n": target_rear_force_n,
         "rear_wheel_force_at_sag_n": rear_wheel_force_at_sag_n,
         "shock_pressure_psi": required_pressure_psi,
@@ -5301,6 +5326,7 @@ async def compute_bike_kinematics(
         shock_type=shock_type,
         shock_model=shock_model,
         shock_stroke_series_mm=shock_stroke_mm_full or shock_stroke_mm_series,
+        shock_force_n_series=shock_force_full or shock_force_series,
         leverage_ratio_series=leverage_ratio_full or leverage_ratio_series,
         rear_axle_relative_mm=rear_axle_relative_mm_full or rear_axle_relative_mm,
         rear_wheel_force_n_series=rear_wheel_force_n_full or rear_wheel_force_n_series,
