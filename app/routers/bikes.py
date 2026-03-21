@@ -2612,6 +2612,7 @@ def _compute_sag_payload(
     leverage_ratio_series: list[Optional[float]],
     rear_axle_relative_mm: list[list[float]],
     rear_wheel_force_n_series: list[Optional[float]],
+    debug_out: Optional[dict[str, object]] = None,
 ) -> dict[str, object]:
     front_center_mm, rear_center_mm = _resolve_front_rear_center_mm(
         settings,
@@ -2679,6 +2680,16 @@ def _compute_sag_payload(
     )
 
     required_pressure_psi: Optional[float] = None
+    pressure_debug: dict[str, Optional[float]] = {
+        "target_rear_force_n": target_rear_force_n,
+        "target_stroke_mm": target_stroke_mm,
+        "rear_sag_travel_mm": rear_sag_travel_mm,
+        "rear_wheel_force_at_sag_n": rear_wheel_force_at_sag_n,
+        "force_at_0_psi_n": None,
+        "force_at_100_psi_n": None,
+        "slope_n_per_psi": None,
+        "required_pressure_psi": None,
+    }
     if (
         shock_type == "air"
         and target_stroke_mm is not None
@@ -2713,12 +2724,31 @@ def _compute_sag_payload(
 
         force_at_0 = _rear_force_at_pressure(0.0)
         force_at_100 = _rear_force_at_pressure(100.0)
+        pressure_debug["force_at_0_psi_n"] = force_at_0
+        pressure_debug["force_at_100_psi_n"] = force_at_100
         if force_at_0 is not None and force_at_100 is not None:
             slope_n_per_psi = (float(force_at_100) - float(force_at_0)) / 100.0
+            pressure_debug["slope_n_per_psi"] = slope_n_per_psi
             if math.isfinite(slope_n_per_psi) and abs(slope_n_per_psi) > 1e-9:
                 solved_pressure = (float(target_rear_force_n) - float(force_at_0)) / slope_n_per_psi
                 if math.isfinite(solved_pressure):
                     required_pressure_psi = max(0.0, float(solved_pressure))
+                    pressure_debug["required_pressure_psi"] = required_pressure_psi
+
+    if isinstance(debug_out, dict):
+        debug_out.update(
+            {
+                "shock_type": shock_type,
+                "target_shock_sag_pct": target_sag_pct,
+                "rider_mass_kg": rider_mass_kg,
+                "bike_mass_kg": bike_mass_kg,
+                "rider_cg_x_mm": rider_cg_x_mm,
+                "frame_cg_x_mm": frame_cg_x_mm,
+                "front_center_mm": front_center_mm,
+                "rear_center_mm": rear_center_mm,
+                **pressure_debug,
+            }
+        )
 
     return {
         "target_shock_sag_pct": target_sag_pct,
@@ -5262,10 +5292,11 @@ async def compute_bike_kinematics(
             anti_rise_series = []
             anti_rise_full = []
 
+    sag_debug: dict[str, object] = {}
     sag_payload = _compute_sag_payload(
         settings=settings,
         geometry=geom,
-        points=points,
+        points=variant_target_points,
         scale_mm_per_px=scale_mm_per_px,
         shock_type=shock_type,
         shock_model=shock_model,
@@ -5273,6 +5304,7 @@ async def compute_bike_kinematics(
         leverage_ratio_series=leverage_ratio_full or leverage_ratio_series,
         rear_axle_relative_mm=rear_axle_relative_mm_full or rear_axle_relative_mm,
         rear_wheel_force_n_series=rear_wheel_force_n_full or rear_wheel_force_n_series,
+        debug_out=sag_debug,
     )
 
     for idx, s in enumerate(solver_steps):
@@ -5361,6 +5393,7 @@ async def compute_bike_kinematics(
         "max_rear_travel_mm": max_rear_travel_mm,
         "rear_axle": rear_axle_debug,
     }
+    result.debug["sag_debug"] = sag_debug
     print(
         "[BikeVariantTravelDebug] "
         f"bike={bike_id} variant={str(variant_doc.get('_id')) if variant_doc else 'base'} "
