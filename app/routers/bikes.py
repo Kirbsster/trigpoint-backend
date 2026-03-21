@@ -67,6 +67,8 @@ from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
+_KINEMATICS_CACHE_SOLVER_VERSION = "variant_pose_v2_gauge_force"
+
 _BIKE_SHARED_SETTINGS_DEFAULTS = {
     "front_wheel_size": "29",
     "rear_wheel_size": "29",
@@ -167,6 +169,15 @@ def _stale_base_kinematics_cache_patch() -> dict:
         "max_rear_travel_mm": None,
     }
 
+
+def _current_kinematics_cache_doc(raw_cache) -> Optional[dict]:
+    if not isinstance(raw_cache, dict) or not raw_cache:
+        return None
+    solver_version = str(raw_cache.get("solver_version") or "").strip()
+    if solver_version != _KINEMATICS_CACHE_SOLVER_VERSION:
+        return None
+    return raw_cache
+
 def bike_doc_to_out(
     doc,
     hero_url: Optional[str] = None,
@@ -215,7 +226,13 @@ def bike_doc_to_out(
                 doc.get("_id"), geometry_raw, exc
             )
 
-    plot_cache_raw = doc.get("kinematics_plot_cache") or {}
+    plot_cache_raw = _current_kinematics_cache_doc(doc.get("kinematics_plot_cache")) or {}
+    cache_status = (
+        str(doc.get("kinematics_cache_status") or "ready")
+        if plot_cache_raw
+        else "stale"
+    )
+    cache_fingerprint = doc.get("kinematics_cache_fingerprint") if plot_cache_raw else None
     kinematics_plot_cache: Optional[KinematicsPlotCache] = None
     if include_plot_cache and plot_cache_raw:
         try:
@@ -283,8 +300,8 @@ def bike_doc_to_out(
         bodies=bodies or None,
         geometry=geometry,
         kinematics_plot_cache=kinematics_plot_cache,
-        kinematics_cache_fingerprint=doc.get("kinematics_cache_fingerprint"),
-        kinematics_cache_status=str(doc.get("kinematics_cache_status") or "stale"),
+        kinematics_cache_fingerprint=cache_fingerprint,
+        kinematics_cache_status=cache_status,
     )
 
 
@@ -562,6 +579,8 @@ async def _next_shock_preset_id(name: Optional[str], brand: Optional[str] = None
 
 
 def _variant_doc_to_out(doc: dict) -> BikeVariantOut:
+    plot_cache_raw = _current_kinematics_cache_doc(doc.get("kinematics_plot_cache"))
+    cache_status = str(doc.get("status") or "ready") if plot_cache_raw else "stale"
     return BikeVariantOut(
         id=str(doc["_id"]),
         bike_id=str(doc["bike_id"]),
@@ -571,8 +590,8 @@ def _variant_doc_to_out(doc: dict) -> BikeVariantOut:
         sort_order=int(doc.get("sort_order", 0) or 0),
         overrides=doc.get("overrides") or {},
         solver_policy=doc.get("solver_policy") or {},
-        kinematics_cache_fingerprint=doc.get("kinematics_cache_fingerprint"),
-        status=str(doc.get("status") or "ready"),
+        kinematics_cache_fingerprint=(doc.get("kinematics_cache_fingerprint") if plot_cache_raw else None),
+        status=cache_status,
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
     )
@@ -903,7 +922,7 @@ def _variant_fingerprint(
     *,
     steps: int,
     iterations: int,
-    solver_version: str = "variant_pose_v1",
+    solver_version: str = _KINEMATICS_CACHE_SOLVER_VERSION,
 ) -> str:
     payload = {
         "bike_id": str(bike_doc.get("_id") or ""),
@@ -1166,11 +1185,13 @@ async def hydrate_bike_variant(
     if not bike_doc or not _can_view_bike(bike_doc, user_oid, is_admin):
         raise HTTPException(status_code=404, detail="Variant not found")
 
+    plot_cache_raw = _current_kinematics_cache_doc(variant_doc.get("kinematics_plot_cache"))
+    cache_status = str(variant_doc.get("status") or "ready") if plot_cache_raw else "stale"
     return BikeVariantHydrateOut(
         variant=_variant_doc_to_out(variant_doc),
-        kinematics_plot_cache=variant_doc.get("kinematics_plot_cache"),
-        kinematics_cache_fingerprint=variant_doc.get("kinematics_cache_fingerprint"),
-        status=str(variant_doc.get("status") or "ready"),
+        kinematics_plot_cache=plot_cache_raw,
+        kinematics_cache_fingerprint=(variant_doc.get("kinematics_cache_fingerprint") if plot_cache_raw else None),
+        status=cache_status,
     )
 
 
@@ -5360,6 +5381,7 @@ async def compute_bike_kinematics(
         "rear_axle_point_id": result.rear_axle_point_id,
         "n_steps": len(solver_steps),
         "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
+        "solver_version": _KINEMATICS_CACHE_SOLVER_VERSION,
         "scaled_outputs": scaled_outputs,
         "debug": persisted_debug,
     }
