@@ -2540,16 +2540,11 @@ def _resolve_front_rear_center_mm(
     if not bb_point or not rear_axle_point or not front_axle_point:
         return front_center_mm, rear_center_mm
 
+    # Load balance uses horizontal CG position, so fallback centers must be horizontal too.
     if front_center_mm is None:
-        front_center_mm = (
-            math.hypot(float(front_axle_point.x) - float(bb_point.x), float(front_axle_point.y) - float(bb_point.y))
-            * float(scale_mm_per_px)
-        )
+        front_center_mm = abs(float(front_axle_point.x) - float(bb_point.x)) * float(scale_mm_per_px)
     if rear_center_mm is None:
-        rear_center_mm = (
-            math.hypot(float(rear_axle_point.x) - float(bb_point.x), float(rear_axle_point.y) - float(bb_point.y))
-            * float(scale_mm_per_px)
-        )
+        rear_center_mm = abs(float(rear_axle_point.x) - float(bb_point.x)) * float(scale_mm_per_px)
     return front_center_mm, rear_center_mm
 
 
