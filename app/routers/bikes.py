@@ -2381,9 +2381,9 @@ _TYRE_THICKNESS_MM = 60.0
 _CHAIN_PITCH_MM = 12.7
 _PSI_TO_PA = 6894.757293168
 _DEFAULT_SHOCK_MODEL: dict[str, float] = {
-    "air_chamber_diameter_mm": 50.8,
-    "body_eyelet_gap_mm": 50.8,
-    "shaft_eyelet_gap_mm": 50.8,
+    "air_chamber_diameter_mm": 40.,
+    "body_eyelet_gap_mm": 5.,
+    "shaft_eyelet_gap_mm": 5.,
     "air_chamber_length_mm": 70,
     "air_negative_chamber_length_mm": 20.0,
     "air_piston_head_thickness_mm": 5.0,
@@ -2397,37 +2397,37 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "coil_preload_n": 0.0,
 }
 _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
-    "body_end_gap_mm": 50.8,
-    "shaft_end_gap_mm": 50.8,
+    "body_end_gap_mm": 5.,
+    "shaft_end_gap_mm": 5.,
     "body_eyelet": {
         "outer_diameter_mm": 19.9,
         "bore_diameter_mm": 12.7,
     },
     "body_end_solid": {
         "length_mm": 0.0,
-        "diameter_mm": 50.8,
+        "diameter_mm": 40.,
     },
     "body_end_positive_chamber": {
         "length_mm": 0.0,
-        "diameter_mm": 50.8,
+        "diameter_mm": 40.,
     },
     "positive_annular_chamber": {
         "length_mm": 0.0,
-        "inner_diameter_mm": 50.8,
-        "outer_diameter_mm": 50.8,
+        "inner_diameter_mm": 0.,
+        "outer_diameter_mm": 0.,
     },
     "swept_air_chamber": {
         "length_mm": 70.0,
-        "diameter_mm": 50.8,
+        "diameter_mm": 40.,
     },
     "negative_chamber_extension": {
         "length_mm": 20.0,
-        "diameter_mm": 50.8,
+        "diameter_mm": 40.,
     },
     "negative_annular_chamber": {
         "length_mm": 0.0,
-        "inner_diameter_mm": 50.8,
-        "outer_diameter_mm": 50.8,
+        "inner_diameter_mm": 0.,
+        "outer_diameter_mm": 0.,
     },
     "damper_shaft": {
         "diameter_mm": 25.4,
@@ -2436,7 +2436,7 @@ _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
         "diameter_mm": 8.0,
     },
     "piston": {
-        "diameter_mm": 50.8,
+        "diameter_mm": 40.,
         "thickness_mm": 5.0,
     },
     "shaft_eyelet": {
@@ -2482,6 +2482,244 @@ def _parse_optional_finite(value) -> Optional[float]:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+def _interpolate_series_value_at_target(
+    xs: list[Optional[float]],
+    ys: list[Optional[float]],
+    target_x: float,
+) -> Optional[float]:
+    length = min(len(xs), len(ys))
+    valid_pairs: list[tuple[float, float]] = []
+    for idx in range(length):
+        x_val = _parse_optional_finite(xs[idx])
+        y_val = _parse_optional_finite(ys[idx])
+        if x_val is None or y_val is None:
+            continue
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            continue
+        valid_pairs.append((float(x_val), float(y_val)))
+    if not valid_pairs:
+        return None
+    for idx in range(len(valid_pairs) - 1):
+        x0, y0 = valid_pairs[idx]
+        x1, y1 = valid_pairs[idx + 1]
+        if abs(x1 - x0) <= 1e-9:
+            if abs(target_x - x0) <= 1e-9:
+                return y0
+            continue
+        spans_target = (x0 - target_x) * (x1 - target_x) <= 0.0
+        if not spans_target:
+            continue
+        t = (target_x - x0) / (x1 - x0)
+        if not math.isfinite(t):
+            continue
+        t = max(0.0, min(1.0, t))
+        y_interp = y0 + t * (y1 - y0)
+        return y_interp if math.isfinite(y_interp) else None
+    nearest = min(valid_pairs, key=lambda pair: abs(pair[0] - target_x))
+    return nearest[1] if nearest else None
+
+
+def _resolve_front_rear_center_mm(
+    settings: dict,
+    geometry: dict,
+    points: list[BikePoint],
+    scale_mm_per_px: float,
+) -> tuple[Optional[float], Optional[float]]:
+    front_center_mm = _parse_optional_finite(geometry.get("front_center_mm"))
+    rear_center_mm = _parse_optional_finite(geometry.get("rear_center_mm"))
+    if front_center_mm is not None and rear_center_mm is not None:
+        return front_center_mm, rear_center_mm
+    if not (scale_mm_per_px > 0):
+        return front_center_mm, rear_center_mm
+
+    bb_point = next((p for p in points if p.type in ("bb", "bottom_bracket")), None)
+    rear_axle_point = next((p for p in points if p.type == "rear_axle"), None)
+    front_axle_point = next((p for p in points if p.type == "front_axle"), None)
+    if not bb_point or not rear_axle_point or not front_axle_point:
+        return front_center_mm, rear_center_mm
+
+    if front_center_mm is None:
+        front_center_mm = (
+            math.hypot(float(front_axle_point.x) - float(bb_point.x), float(front_axle_point.y) - float(bb_point.y))
+            * float(scale_mm_per_px)
+        )
+    if rear_center_mm is None:
+        rear_center_mm = (
+            math.hypot(float(rear_axle_point.x) - float(bb_point.x), float(rear_axle_point.y) - float(bb_point.y))
+            * float(scale_mm_per_px)
+        )
+    return front_center_mm, rear_center_mm
+
+
+def _compute_target_rear_wheel_force_n(
+    settings: dict,
+    geometry: dict,
+    points: list[BikePoint],
+    scale_mm_per_px: float,
+) -> Optional[float]:
+    rider_mass_kg = _parse_optional_finite(settings.get("rider_mass_kg"))
+    bike_mass_kg = _parse_optional_finite(settings.get("frame_mass_kg"))
+    total_mass_kg = float(rider_mass_kg or 0.0) + float(bike_mass_kg or 0.0)
+    rider_cg_x_mm = _parse_optional_finite(settings.get("rider_cg_x_mm"))
+    frame_cg_x_mm = _parse_optional_finite(settings.get("frame_cg_x_mm"))
+    front_center_mm, rear_center_mm = _resolve_front_rear_center_mm(
+        settings,
+        geometry,
+        points,
+        scale_mm_per_px,
+    )
+    if total_mass_kg <= 0.0 or front_center_mm is None or rear_center_mm is None:
+        return None
+    wheelbase_mm = float(front_center_mm + rear_center_mm)
+    if wheelbase_mm <= 1e-9:
+        return None
+    combined_cg_x_mm = (
+        (float(rider_mass_kg or 0.0) * float(rider_cg_x_mm or 0.0))
+        + (float(bike_mass_kg or 0.0) * float(frame_cg_x_mm or 0.0))
+    ) / float(total_mass_kg)
+    rear_load_fraction = (float(front_center_mm) - combined_cg_x_mm) / wheelbase_mm
+    rear_load_fraction = max(0.0, min(1.0, rear_load_fraction))
+    return total_mass_kg * 9.80665 * rear_load_fraction
+
+
+def _compute_sag_payload(
+    *,
+    settings: dict,
+    geometry: dict,
+    points: list[BikePoint],
+    scale_mm_per_px: float,
+    shock_type: str,
+    shock_model: dict[str, object],
+    shock_stroke_series_mm: list[Optional[float]],
+    leverage_ratio_series: list[Optional[float]],
+    rear_axle_relative_mm: list[list[float]],
+    rear_wheel_force_n_series: list[Optional[float]],
+) -> dict[str, object]:
+    front_center_mm, rear_center_mm = _resolve_front_rear_center_mm(
+        settings,
+        geometry,
+        points,
+        scale_mm_per_px,
+    )
+    target_sag_pct = _parse_optional_finite(settings.get("shock_target_sag_pct"))
+    if target_sag_pct is not None:
+        target_sag_pct = max(0.0, min(100.0, float(target_sag_pct)))
+    rider_mass_kg = _parse_optional_finite(settings.get("rider_mass_kg"))
+    bike_mass_kg = _parse_optional_finite(settings.get("frame_mass_kg"))
+    rider_cg_x_mm = _parse_optional_finite(settings.get("rider_cg_x_mm"))
+    frame_cg_x_mm = _parse_optional_finite(settings.get("frame_cg_x_mm"))
+    target_rear_force_n = _compute_target_rear_wheel_force_n(
+        settings,
+        geometry,
+        points,
+        scale_mm_per_px,
+    )
+
+    valid_strokes: list[float] = []
+    for raw_stroke in shock_stroke_series_mm:
+        parsed_stroke = _parse_optional_finite(raw_stroke)
+        if parsed_stroke is None:
+            continue
+        valid_strokes.append(float(parsed_stroke))
+    stroke_min = min(valid_strokes) if valid_strokes else None
+    stroke_max = max(valid_strokes) if valid_strokes else None
+    target_stroke_mm: Optional[float] = None
+    if (
+        target_sag_pct is not None
+        and stroke_min is not None
+        and stroke_max is not None
+        and (stroke_max - stroke_min) > 1e-9
+    ):
+        target_stroke_mm = stroke_min + ((stroke_max - stroke_min) * float(target_sag_pct) / 100.0)
+
+    rear_travel_series_mm: list[Optional[float]] = []
+    for row in rear_axle_relative_mm:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            dy = _parse_optional_finite(row[1])
+            rear_travel_series_mm.append(-float(dy) if dy is not None else None)
+        else:
+            rear_travel_series_mm.append(None)
+
+    rear_sag_travel_mm = (
+        _interpolate_series_value_at_target(
+            shock_stroke_series_mm,
+            rear_travel_series_mm,
+            float(target_stroke_mm),
+        )
+        if target_stroke_mm is not None
+        else None
+    )
+
+    rear_wheel_force_at_sag_n = (
+        _interpolate_series_value_at_target(
+            rear_travel_series_mm,
+            rear_wheel_force_n_series,
+            float(rear_sag_travel_mm),
+        )
+        if rear_sag_travel_mm is not None
+        else None
+    )
+
+    required_pressure_psi: Optional[float] = None
+    if (
+        shock_type == "air"
+        and target_stroke_mm is not None
+        and target_rear_force_n is not None
+        and leverage_ratio_series
+    ):
+        model_base: dict[str, float] = {}
+        for key, value in shock_model.items():
+            parsed = _parse_optional_finite(value)
+            if parsed is not None:
+                model_base[key] = float(parsed)
+        model_base["air_initial_pressure_psi"] = 0.0
+
+        def _rear_force_at_pressure(pressure_psi: float) -> Optional[float]:
+            model = dict(model_base)
+            model["air_initial_pressure_psi"] = max(0.0, float(pressure_psi))
+            shock_force_series, _ = _compute_shock_force_and_rate_series(
+                shock_stroke_series_mm,
+                "air",
+                model,
+                temp_c=float(model.get("air_reference_temp_c", _DEFAULT_SHOCK_MODEL["air_reference_temp_c"])),
+            )
+            rear_force_series = _compute_rear_wheel_force_n_series(
+                shock_force_series,
+                leverage_ratio_series,
+            )
+            return _interpolate_series_value_at_target(
+                shock_stroke_series_mm,
+                rear_force_series,
+                float(target_stroke_mm),
+            )
+
+        force_at_0 = _rear_force_at_pressure(0.0)
+        force_at_100 = _rear_force_at_pressure(100.0)
+        if force_at_0 is not None and force_at_100 is not None:
+            slope_n_per_psi = (float(force_at_100) - float(force_at_0)) / 100.0
+            if math.isfinite(slope_n_per_psi) and abs(slope_n_per_psi) > 1e-9:
+                solved_pressure = (float(target_rear_force_n) - float(force_at_0)) / slope_n_per_psi
+                if math.isfinite(solved_pressure):
+                    required_pressure_psi = max(0.0, float(solved_pressure))
+
+    return {
+        "target_shock_sag_pct": target_sag_pct,
+        "shock_stroke_mm": target_stroke_mm,
+        "rear_sag_travel_mm": rear_sag_travel_mm,
+        "rear_wheel_force_n": target_rear_force_n,
+        "rear_wheel_force_at_sag_n": rear_wheel_force_at_sag_n,
+        "shock_pressure_psi": required_pressure_psi,
+        "required_air_pressure_psi": required_pressure_psi,
+        "rider_mass_kg": rider_mass_kg,
+        "bike_mass_kg": bike_mass_kg,
+        "rider_cg_x_mm": rider_cg_x_mm,
+        "frame_cg_x_mm": frame_cg_x_mm,
+        "front_center_mm": front_center_mm,
+        "rear_center_mm": rear_center_mm,
+        "shock_type": shock_type,
+    }
 
 
 def _copy_shock_visual_model_defaults() -> dict[str, object]:
@@ -5001,6 +5239,19 @@ async def compute_bike_kinematics(
             anti_rise_series = []
             anti_rise_full = []
 
+    sag_payload = _compute_sag_payload(
+        settings=settings,
+        geometry=geom,
+        points=points,
+        scale_mm_per_px=scale_mm_per_px,
+        shock_type=shock_type,
+        shock_model=shock_model,
+        shock_stroke_series_mm=shock_stroke_mm_full or shock_stroke_mm_series,
+        leverage_ratio_series=leverage_ratio_full or leverage_ratio_series,
+        rear_axle_relative_mm=rear_axle_relative_mm_full or rear_axle_relative_mm,
+        rear_wheel_force_n_series=rear_wheel_force_n_full or rear_wheel_force_n_series,
+    )
+
     for idx, s in enumerate(solver_steps):
         anti_squat_val = anti_squat_series[idx] if idx < len(anti_squat_series) else None
         anti_rise_val = anti_rise_series[idx] if idx < len(anti_rise_series) else None
@@ -5058,6 +5309,7 @@ async def compute_bike_kinematics(
         "rear_wheel_force_n_per_mm_full": rear_wheel_force_full,
         "rear_wheel_force_n_full": rear_wheel_force_n_full,
         "instant_center_coords_full": instant_center_coords_full,
+        "sag": sag_payload,
         "rear_brake_caliper_point_id": brake_caliper_point_id,
         "convergence_metric": linkage_convergence.get("metric", "max_point_displacement_mm"),
         "convergence_per_step": linkage_convergence.get("step_summaries", []),
