@@ -3676,12 +3676,19 @@ def _compute_shock_force_and_rate_series(
         v_pos_m3, v_neg_m3 = _volumes_at(s)
         if v_pos_m3 <= min_pos_m3 or v_neg_m3 <= min_neg_m3:
             return None
-        p_pos = c_pos0 / v_pos_m3
-        p_neg = c_neg0 / v_neg_m3
+        p_pos_abs = c_pos0 / v_pos_m3
+        p_neg_abs = c_neg0 / v_neg_m3
+        p_pos_gauge = p_pos_abs - (14.6959 * _PSI_TO_PA)
+        p_neg_gauge = p_neg_abs - (14.6959 * _PSI_TO_PA)
 
-        if not (math.isfinite(p_pos) and math.isfinite(p_neg)):
+        if not (
+            math.isfinite(p_pos_abs)
+            and math.isfinite(p_neg_abs)
+            and math.isfinite(p_pos_gauge)
+            and math.isfinite(p_neg_gauge)
+        ):
             return None
-        force_n = p_pos * pos_area_m2 - p_neg * neg_area_m2
+        force_n = p_pos_gauge * pos_area_m2 - p_neg_gauge * neg_area_m2
         return force_n if math.isfinite(force_n) else None
 
     parsed_strokes: list[Optional[float]] = [
