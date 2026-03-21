@@ -5395,6 +5395,26 @@ async def compute_bike_kinematics(
     }
     result.debug["sag_debug"] = sag_debug
     print(
+        "[SagDebug] "
+        f"bike={bike_id} variant={str(variant_doc.get('_id')) if variant_doc else 'base'} "
+        f"shock_type={sag_debug.get('shock_type')} "
+        f"target_sag_pct={sag_debug.get('target_shock_sag_pct')} "
+        f"rider_mass_kg={sag_debug.get('rider_mass_kg')} "
+        f"bike_mass_kg={sag_debug.get('bike_mass_kg')} "
+        f"rider_cg_x_mm={sag_debug.get('rider_cg_x_mm')} "
+        f"frame_cg_x_mm={sag_debug.get('frame_cg_x_mm')} "
+        f"front_center_mm={sag_debug.get('front_center_mm')} "
+        f"rear_center_mm={sag_debug.get('rear_center_mm')} "
+        f"target_rear_force_n={sag_debug.get('target_rear_force_n')} "
+        f"target_stroke_mm={sag_debug.get('target_stroke_mm')} "
+        f"rear_sag_travel_mm={sag_debug.get('rear_sag_travel_mm')} "
+        f"rear_wheel_force_at_sag_n={sag_debug.get('rear_wheel_force_at_sag_n')} "
+        f"force_at_0_psi_n={sag_debug.get('force_at_0_psi_n')} "
+        f"force_at_100_psi_n={sag_debug.get('force_at_100_psi_n')} "
+        f"slope_n_per_psi={sag_debug.get('slope_n_per_psi')} "
+        f"required_pressure_psi={sag_debug.get('required_pressure_psi')}"
+    )
+    print(
         "[BikeVariantTravelDebug] "
         f"bike={bike_id} variant={str(variant_doc.get('_id')) if variant_doc else 'base'} "
         f"rear_wheel={str(settings.get('rear_wheel_size', '29'))} "
