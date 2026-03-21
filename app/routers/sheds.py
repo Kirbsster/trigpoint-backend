@@ -446,7 +446,7 @@ async def list_bikes_in_shed(
     for d in docs:
         hero_id = d.get("hero_media_id")
         hero_url = await resolve_hero_url(hero_id)
-        out.append(bike_doc_to_out(d, hero_url=hero_url))
+        out.append(bike_doc_to_out(d, hero_url=hero_url, include_plot_cache=True))
 
     return out
 

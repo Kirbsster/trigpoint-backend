@@ -28,6 +28,8 @@ from app.schemas import (
     BikeOut,
     BikeGeometry,
     BikeKinematics,
+    KinematicsAnimationCache,
+    KinematicsPlotCache,
     RimEllipse,
     BikeUpdate,
     BikePageSettingsPayload,
@@ -142,7 +144,7 @@ def _derive_max_rear_travel_mm(doc: dict) -> Optional[int]:
     direct = _round_to_nearest_10_mm(doc.get("max_rear_travel_mm"))
     if direct is not None:
         return direct
-    kin = doc.get("kinematics")
+    kin = doc.get("kinematics_plot_cache")
     if not isinstance(kin, dict):
         return None
     scaled = kin.get("scaled_outputs")
@@ -155,6 +157,16 @@ def _derive_max_rear_travel_mm(doc: dict) -> Optional[int]:
         return None
     return _round_to_nearest_10_mm(max(candidates))
 
+
+def _stale_base_kinematics_cache_patch() -> dict:
+    return {
+        "kinematics_plot_cache": None,
+        "kinematics_animation_cache": None,
+        "kinematics_cache_fingerprint": None,
+        "kinematics_cache_status": "stale",
+        "max_rear_travel_mm": None,
+    }
+
 def bike_doc_to_out(
     doc,
     hero_url: Optional[str] = None,
@@ -164,6 +176,7 @@ def bike_doc_to_out(
     hero_detection_boxes: Optional[dict] = None,
     creator_shareable_id: Optional[str] = None,
     can_edit: Optional[bool] = None,
+    include_plot_cache: bool = False,
 ) -> BikeOut:
     owner_raw = doc.get("owner_user_id") if doc.get("owner_user_id") is not None else doc.get("user_id")
     visibility = str(doc.get("visibility") or "private").strip().lower()
@@ -202,16 +215,15 @@ def bike_doc_to_out(
                 doc.get("_id"), geometry_raw, exc
             )
 
-    # 👇 NEW: kinematics block
-    kin_raw = doc.get("kinematics") or {}
-    kinematics: Optional[BikeKinematics] = None
-    if kin_raw:
+    plot_cache_raw = doc.get("kinematics_plot_cache") or {}
+    kinematics_plot_cache: Optional[KinematicsPlotCache] = None
+    if include_plot_cache and plot_cache_raw:
         try:
-            kinematics = BikeKinematics(**kin_raw)
+            kinematics_plot_cache = KinematicsPlotCache(**plot_cache_raw)
         except Exception as exc:
             logging.warning(
-                "Skipping invalid kinematics on bike %s: %r (%s)",
-                doc.get("_id"), kin_raw, exc
+                "Skipping invalid kinematics_plot_cache on bike %s: %r (%s)",
+                doc.get("_id"), plot_cache_raw, exc
             )
 
     perspective_ellipses: Optional[dict[str, RimEllipse]] = None
@@ -270,7 +282,9 @@ def bike_doc_to_out(
         points=points or None,
         bodies=bodies or None,
         geometry=geometry,
-        kinematics=kinematics, 
+        kinematics_plot_cache=kinematics_plot_cache,
+        kinematics_cache_fingerprint=doc.get("kinematics_cache_fingerprint"),
+        kinematics_cache_status=str(doc.get("kinematics_cache_status") or "stale"),
     )
 
 
@@ -557,9 +571,7 @@ def _variant_doc_to_out(doc: dict) -> BikeVariantOut:
         sort_order=int(doc.get("sort_order", 0) or 0),
         overrides=doc.get("overrides") or {},
         solver_policy=doc.get("solver_policy") or {},
-        cache_fingerprint=doc.get("cache_fingerprint"),
-        pose_cache=doc.get("pose_cache"),
-        kinematics_cache=doc.get("kinematics_cache"),
+        kinematics_cache_fingerprint=doc.get("kinematics_cache_fingerprint"),
         status=str(doc.get("status") or "ready"),
         created_at=doc["created_at"],
         updated_at=doc["updated_at"],
@@ -603,10 +615,10 @@ async def _ensure_base_variant_for_bike(bike_doc: dict) -> dict:
         "sort_order": 0,
         "overrides": {},
         "solver_policy": {},
-        "cache_fingerprint": None,
-        "pose_cache": None,
-        "kinematics_cache": None,
-        "status": "ready",
+        "kinematics_cache_fingerprint": None,
+        "kinematics_plot_cache": None,
+        "kinematics_animation_cache": None,
+        "status": "stale",
         "created_at": now,
         "updated_at": now,
     }
@@ -972,6 +984,10 @@ async def create_bike(
         "model_year": bike_in.model_year,
         "bike_size": bike_in.bike_size,
         **_default_bike_shared_settings(),
+        "kinematics_plot_cache": None,
+        "kinematics_animation_cache": None,
+        "kinematics_cache_fingerprint": None,
+        "kinematics_cache_status": "stale",
         "created_at": now,
         "updated_at": now,
     }
@@ -1033,9 +1049,9 @@ async def create_bike_variant(
         "sort_order": int(sort_order),
         "overrides": payload.overrides or {},
         "solver_policy": payload.solver_policy or {},
-        "cache_fingerprint": None,
-        "pose_cache": None,
-        "kinematics_cache": None,
+        "kinematics_cache_fingerprint": None,
+        "kinematics_plot_cache": None,
+        "kinematics_animation_cache": None,
         "status": "stale",
         "created_at": now,
         "updated_at": now,
@@ -1089,22 +1105,22 @@ async def update_bike_variant(
         update_doc["sort_order"] = int(payload.sort_order)
     if payload.overrides is not None:
         update_doc["overrides"] = payload.overrides
-        update_doc["pose_cache"] = None
-        update_doc["kinematics_cache"] = None
-        update_doc["cache_fingerprint"] = None
+        update_doc["kinematics_plot_cache"] = None
+        update_doc["kinematics_animation_cache"] = None
+        update_doc["kinematics_cache_fingerprint"] = None
         update_doc["status"] = "stale"
     if payload.solver_policy is not None:
         update_doc["solver_policy"] = payload.solver_policy
-        update_doc["pose_cache"] = None
-        update_doc["kinematics_cache"] = None
-        update_doc["cache_fingerprint"] = None
+        update_doc["kinematics_plot_cache"] = None
+        update_doc["kinematics_animation_cache"] = None
+        update_doc["kinematics_cache_fingerprint"] = None
         update_doc["status"] = "stale"
-    if payload.cache_fingerprint is not None:
-        update_doc["cache_fingerprint"] = payload.cache_fingerprint
-    if payload.pose_cache is not None:
-        update_doc["pose_cache"] = payload.pose_cache
-    if payload.kinematics_cache is not None:
-        update_doc["kinematics_cache"] = payload.kinematics_cache
+    if payload.kinematics_cache_fingerprint is not None:
+        update_doc["kinematics_cache_fingerprint"] = payload.kinematics_cache_fingerprint
+    if payload.kinematics_plot_cache is not None:
+        update_doc["kinematics_plot_cache"] = payload.kinematics_plot_cache
+    if payload.kinematics_animation_cache is not None:
+        update_doc["kinematics_animation_cache"] = payload.kinematics_animation_cache
     if payload.status is not None:
         update_doc["status"] = payload.status
 
@@ -1152,9 +1168,8 @@ async def hydrate_bike_variant(
 
     return BikeVariantHydrateOut(
         variant=_variant_doc_to_out(variant_doc),
-        pose_cache=variant_doc.get("pose_cache"),
-        kinematics_cache=variant_doc.get("kinematics_cache"),
-        cache_fingerprint=variant_doc.get("cache_fingerprint"),
+        kinematics_plot_cache=variant_doc.get("kinematics_plot_cache"),
+        kinematics_cache_fingerprint=variant_doc.get("kinematics_cache_fingerprint"),
         status=str(variant_doc.get("status") or "ready"),
     )
 
@@ -1405,6 +1420,7 @@ async def get_bike(
         hero_perspective_homography=hero_perspective_homography,
         hero_detection_boxes=hero_detection_boxes,
         can_edit=_is_bike_owner(doc, user_oid),
+        include_plot_cache=True,
     )
 
 
@@ -1427,7 +1443,7 @@ async def update_bike(
     bikes = bikes_col()
     result = await bikes.update_one(
         {"_id": oid, **_owner_filter(user_oid)},
-        {"$set": {**update_data, "updated_at": datetime.utcnow()}},
+        {"$set": {**update_data, **_stale_base_kinematics_cache_patch(), "updated_at": datetime.utcnow()}},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Bike not found")
@@ -1524,7 +1540,7 @@ async def update_bike_access(
         raise HTTPException(status_code=403, detail="Verified bikes must stay public")
 
     patch["updated_at"] = datetime.utcnow()
-    await bikes.update_one({"_id": oid}, {"$set": patch})
+    await bikes.update_one({"_id": oid}, {"$set": {**patch, **_stale_base_kinematics_cache_patch()}})
     updated = await bikes.find_one({"_id": oid})
     if not updated:
         raise HTTPException(status_code=404, detail="Bike not found")
@@ -1687,6 +1703,7 @@ async def update_bike_points(
         {
             "$set": {
                 "points": [p.dict() for p in payload.points],
+                **_stale_base_kinematics_cache_patch(),
                 "updated_at": now,
             }
         },
@@ -1742,9 +1759,9 @@ async def update_variant_points(
 
     update_doc = {
         "overrides": next_overrides,
-        "pose_cache": None,
-        "kinematics_cache": None,
-        "cache_fingerprint": None,
+        "kinematics_plot_cache": None,
+        "kinematics_animation_cache": None,
+        "kinematics_cache_fingerprint": None,
         "status": "stale",
         "updated_at": datetime.utcnow(),
     }
@@ -1829,6 +1846,7 @@ async def update_bodies(
         {
             "$set": {
                 "bodies": [b.dict() for b in payload.bodies],
+                **_stale_base_kinematics_cache_patch(),
                 "updated_at": datetime.utcnow(),
             }
         },
@@ -4079,7 +4097,7 @@ async def update_geometry(
 
     await bikes.update_one(
         {"_id": oid, **_owner_filter(user_oid)},
-        {"$set": {"geometry": geometry, "updated_at": datetime.utcnow()}},
+        {"$set": {"geometry": geometry, **_stale_base_kinematics_cache_patch(), "updated_at": datetime.utcnow()}},
     )
 
     updated = await bikes.find_one({"_id": oid, **_owner_filter(user_oid)})
@@ -5084,14 +5102,17 @@ async def compute_bike_kinematics(
     if isinstance(persisted_debug, dict):
         persisted_debug.pop("convergence", None)
 
-    kin_doc = {
+    plot_cache_doc = {
         "rear_axle_point_id": result.rear_axle_point_id,
         "n_steps": len(solver_steps),
-        # Already in mm after scaling above
         "driver_stroke": solver_steps[-1].shock_stroke if solver_steps else None,
-        "steps": serialized_solver_steps,
         "scaled_outputs": scaled_outputs,
         "debug": persisted_debug,
+    }
+    animation_cache_doc = {
+        "rear_axle_point_id": result.rear_axle_point_id,
+        "n_steps": len(solver_steps),
+        "steps": serialized_solver_steps,
     }
 
     # --------------------------------------------------------
@@ -5103,7 +5124,10 @@ async def compute_bike_kinematics(
             {
                 "$set": {
                     "points": new_points,
-                    "kinematics": kin_doc,
+                    "kinematics_plot_cache": plot_cache_doc,
+                    "kinematics_animation_cache": animation_cache_doc,
+                    "kinematics_cache_fingerprint": variant_fingerprint,
+                    "kinematics_cache_status": "ready",
                     "max_rear_travel_mm": max_rear_travel_mm,
                     "updated_at": datetime.utcnow(),
                 }
@@ -5114,9 +5138,9 @@ async def compute_bike_kinematics(
             {"_id": variant_doc["_id"], "bike_id": oid},
             {
                 "$set": {
-                    "pose_cache": None,
-                    "kinematics_cache": kin_doc,
-                    "cache_fingerprint": variant_fingerprint,
+                    "kinematics_plot_cache": plot_cache_doc,
+                    "kinematics_animation_cache": animation_cache_doc,
+                    "kinematics_cache_fingerprint": variant_fingerprint,
                     "status": "ready",
                     "updated_at": datetime.utcnow(),
                 }
@@ -5170,15 +5194,12 @@ async def debug_bike(
     }
 
 
-@router.get("/{bike_id}/kinematics_cached", response_model=BikeKinematics)
-async def get_cached_bike_kinematics(
+@router.get("/{bike_id}/kinematics_animation_cache", response_model=KinematicsAnimationCache)
+async def get_cached_bike_kinematics_animation_cache(
     bike_id: str,
+    variant_id: Optional[str] = None,
     current_user=Depends(get_current_user),
 ):
-    """
-    Return cached kinematics from the bike document (no solver run).
-    This reads doc["kinematics"] written by /{bike_id}/kinematics.
-    """
     user_oid = _extract_user_oid(current_user)
     is_admin = _is_admin_user(current_user)
 
@@ -5187,32 +5208,40 @@ async def get_cached_bike_kinematics(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid bike_id")
 
-    bikes = bikes_col()
-    doc = await bikes.find_one({"_id": oid})
+    doc = await bikes_col().find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Bike not found")
     if not _can_view_bike(doc, user_oid, is_admin):
         raise HTTPException(status_code=403, detail="Not allowed to view this bike")
 
-    kin = doc.get("kinematics")
-    if not kin:
-        # No cached run yet
-        return BikeKinematics(
-            rear_axle_point_id=None,
-            n_steps=0,
-            driver_stroke=None,
-            steps=[],
-            debug=None,
+    cache_doc: Optional[dict] = None
+    if variant_id:
+        variant_doc = await _load_variant_or_404(variant_id)
+        if str(variant_doc.get("bike_id")) != str(oid):
+            raise HTTPException(status_code=404, detail="Variant not found")
+        cache_doc = (
+            variant_doc.get("kinematics_animation_cache")
+            if isinstance(variant_doc.get("kinematics_animation_cache"), dict)
+            else None
+        )
+    else:
+        cache_doc = (
+            doc.get("kinematics_animation_cache")
+            if isinstance(doc.get("kinematics_animation_cache"), dict)
+            else None
         )
 
-    # Normalize a bit so the frontend always gets predictable fields
-    return BikeKinematics(
-        rear_axle_point_id=kin.get("rear_axle_point_id"),
-        n_steps=kin.get("n_steps") or (len(kin.get("steps") or [])),
-        driver_stroke=kin.get("driver_stroke"),
-        steps=kin.get("steps") or [],
-        scaled_outputs=kin.get("scaled_outputs"),
-        debug=kin.get("debug"),
+    if not cache_doc:
+        return KinematicsAnimationCache(
+            rear_axle_point_id=None,
+            n_steps=0,
+            steps=[],
+        )
+
+    return KinematicsAnimationCache(
+        rear_axle_point_id=cache_doc.get("rear_axle_point_id"),
+        n_steps=cache_doc.get("n_steps") or (len(cache_doc.get("steps") or [])),
+        steps=cache_doc.get("steps") or [],
     )
 
 

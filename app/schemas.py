@@ -221,6 +221,11 @@ class KinematicsStep(BaseModel):
     rear_wheel_force: Optional[float] = None
 
 
+class KinematicsAnimationStep(KinematicsStep):
+    rear_wheel_force_n: Optional[float] = None
+    points: Dict[str, List[float]] = Field(default_factory=dict)
+
+
 class BikeKinematics(BaseModel):
     rear_axle_point_id: Optional[str] = None
     n_steps: int = 0
@@ -228,6 +233,23 @@ class BikeKinematics(BaseModel):
     steps: List[KinematicsStep] = Field(default_factory=list)
     scaled_outputs: Optional[Dict[str, Any]] = None
     debug: Optional[Dict[str, Any]] = None
+
+
+KinematicsCacheStatus = Literal["ready", "stale", "pending", "failed"]
+
+
+class KinematicsPlotCache(BaseModel):
+    rear_axle_point_id: Optional[str] = None
+    n_steps: int = 0
+    driver_stroke: Optional[float] = None
+    scaled_outputs: Dict[str, Any] = Field(default_factory=dict)
+    debug: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KinematicsAnimationCache(BaseModel):
+    rear_axle_point_id: Optional[str] = None
+    n_steps: int = 0
+    steps: List[KinematicsAnimationStep] = Field(default_factory=list)
 
 
 class BikeOut(BaseModel):
@@ -264,7 +286,9 @@ class BikeOut(BaseModel):
     points: Optional[List[BikePoint]] = None
     bodies: Optional[List[RigidBody]] = None
     geometry: BikeGeometry | None = None
-    kinematics: Optional[BikeKinematics] = None
+    kinematics_plot_cache: Optional[KinematicsPlotCache] = None
+    kinematics_cache_fingerprint: Optional[str] = None
+    kinematics_cache_status: KinematicsCacheStatus = "stale"
 
 
 class BikeUpdate(BaseModel):
@@ -298,7 +322,7 @@ class BikePageSettingsOut(BikePageSettingsPayload):
     updated_at: datetime
 
 
-BikeVariantStatus = Literal["ready", "stale", "pending", "failed"]
+BikeVariantStatus = KinematicsCacheStatus
 
 
 class BikeVariantCreate(BaseModel):
@@ -315,9 +339,9 @@ class BikeVariantUpdate(BaseModel):
     sort_order: Optional[int] = None
     overrides: Optional[Dict[str, Any]] = None
     solver_policy: Optional[Dict[str, Any]] = None
-    cache_fingerprint: Optional[str] = None
-    pose_cache: Optional[Dict[str, Any]] = None
-    kinematics_cache: Optional[Dict[str, Any]] = None
+    kinematics_cache_fingerprint: Optional[str] = None
+    kinematics_plot_cache: Optional[KinematicsPlotCache] = None
+    kinematics_animation_cache: Optional[KinematicsAnimationCache] = None
     status: Optional[BikeVariantStatus] = None
 
 
@@ -330,9 +354,7 @@ class BikeVariantOut(BaseModel):
     sort_order: int = 0
     overrides: Dict[str, Any] = Field(default_factory=dict)
     solver_policy: Dict[str, Any] = Field(default_factory=dict)
-    cache_fingerprint: Optional[str] = None
-    pose_cache: Optional[Dict[str, Any]] = None
-    kinematics_cache: Optional[Dict[str, Any]] = None
+    kinematics_cache_fingerprint: Optional[str] = None
     status: BikeVariantStatus = "ready"
     created_at: datetime
     updated_at: datetime
@@ -340,7 +362,6 @@ class BikeVariantOut(BaseModel):
 
 class BikeVariantHydrateOut(BaseModel):
     variant: BikeVariantOut
-    pose_cache: Optional[Dict[str, Any]] = None
-    kinematics_cache: Optional[Dict[str, Any]] = None
-    cache_fingerprint: Optional[str] = None
+    kinematics_plot_cache: Optional[KinematicsPlotCache] = None
+    kinematics_cache_fingerprint: Optional[str] = None
     status: BikeVariantStatus = "ready"
