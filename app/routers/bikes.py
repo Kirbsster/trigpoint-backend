@@ -2402,11 +2402,11 @@ _TYRE_THICKNESS_MM = 60.0
 _CHAIN_PITCH_MM = 12.7
 _PSI_TO_PA = 6894.757293168
 _DEFAULT_SHOCK_MODEL: dict[str, float] = {
-    "air_chamber_diameter_mm": 40.,
-    "body_eyelet_gap_mm": 5.,
-    "shaft_eyelet_gap_mm": 5.,
-    "air_chamber_length_mm": 70,
-    "air_negative_chamber_length_mm": 20.0,
+    "air_chamber_diameter_mm": 50.8,
+    "body_eyelet_gap_mm": 50.8,
+    "shaft_eyelet_gap_mm": 50.8,
+    "air_chamber_length_mm": 75.0,
+    "air_negative_chamber_length_mm": 15.0,
     "air_piston_head_thickness_mm": 5.0,
     "air_shaft_diameter_mm": 25.4,
     "air_positive_shaft_diameter_mm": 8.0,
@@ -2418,37 +2418,37 @@ _DEFAULT_SHOCK_MODEL: dict[str, float] = {
     "coil_preload_n": 0.0,
 }
 _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
-    "body_end_gap_mm": 5.,
-    "shaft_end_gap_mm": 5.,
+    "body_end_gap_mm": 50.8,
+    "shaft_end_gap_mm": 50.8,
     "body_eyelet": {
         "outer_diameter_mm": 19.9,
         "bore_diameter_mm": 12.7,
     },
     "body_end_solid": {
         "length_mm": 0.0,
-        "diameter_mm": 40.,
+        "diameter_mm": 50.8,
     },
     "body_end_positive_chamber": {
         "length_mm": 0.0,
-        "diameter_mm": 40.,
+        "diameter_mm": 50.8,
     },
     "positive_annular_chamber": {
         "length_mm": 0.0,
-        "inner_diameter_mm": 0.,
-        "outer_diameter_mm": 0.,
+        "inner_diameter_mm": 50.8,
+        "outer_diameter_mm": 50.8,
     },
     "swept_air_chamber": {
-        "length_mm": 70.0,
-        "diameter_mm": 40.,
+        "length_mm": 75.0,
+        "diameter_mm": 50.8,
     },
     "negative_chamber_extension": {
-        "length_mm": 20.0,
-        "diameter_mm": 40.,
+        "length_mm": 15.0,
+        "diameter_mm": 50.8,
     },
     "negative_annular_chamber": {
         "length_mm": 0.0,
-        "inner_diameter_mm": 0.,
-        "outer_diameter_mm": 0.,
+        "inner_diameter_mm": 50.8,
+        "outer_diameter_mm": 50.8,
     },
     "damper_shaft": {
         "diameter_mm": 25.4,
@@ -2457,7 +2457,7 @@ _DEFAULT_SHOCK_VISUAL_MODEL: dict[str, dict[str, float] | float] = {
         "diameter_mm": 8.0,
     },
     "piston": {
-        "diameter_mm": 40.,
+        "diameter_mm": 50.8,
         "thickness_mm": 5.0,
     },
     "shaft_eyelet": {
@@ -2760,14 +2760,20 @@ def _compute_sag_payload(
 
     if isinstance(debug_out, dict):
         shock_settings_debug: dict[str, object] = {}
-        for key, value in shock_model.items():
-            if isinstance(value, dict):
-                continue
-            parsed = _parse_optional_finite(value)
+        for key in [
+            "air_initial_pressure_psi",
+            "air_reference_temp_c",
+            "air_cold_temp_c",
+            "air_hot_temp_c",
+            "coil_rate_n_per_mm",
+            "coil_preload_n",
+        ]:
+            parsed = _parse_optional_finite(shock_model.get(key))
             if parsed is not None:
                 shock_settings_debug[key] = float(parsed)
-            elif value is not None:
-                shock_settings_debug[key] = value
+        visual_model = shock_model.get("visual_model")
+        if isinstance(visual_model, dict):
+            shock_settings_debug["visual_model"] = json.loads(json.dumps(visual_model))
         debug_out.update(
             {
                 "shock_type": shock_type,
@@ -3009,6 +3015,260 @@ def _normalize_shock_visual_model(raw_visual, model: dict[str, object]) -> dict[
     return visual
 
 
+def _derive_legacy_shock_fields_from_visual_model(
+    visual: dict[str, object],
+    base_model: dict[str, object],
+) -> dict[str, float]:
+    def _nested_float(section: str, field: str, fallback: float, minimum: float = 0.0) -> float:
+        raw_section = visual.get(section)
+        value = None
+        if isinstance(raw_section, dict):
+            value = _parse_optional_finite(raw_section.get(field))
+        if value is None:
+            value = _parse_optional_finite(base_model.get(field))
+        if value is None:
+            value = fallback
+        return max(minimum, float(value))
+
+    swept_d = _nested_float(
+        "swept_air_chamber",
+        "diameter_mm",
+        float(base_model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
+        1.0,
+    )
+    swept_len = _nested_float(
+        "swept_air_chamber",
+        "length_mm",
+        float(base_model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])),
+        1e-3,
+    )
+    neg_len = _nested_float(
+        "negative_chamber_extension",
+        "length_mm",
+        float(
+            base_model.get(
+                "air_negative_chamber_length_mm",
+                _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"],
+            )
+        ),
+        0.0,
+    )
+    damper_shaft_d = _nested_float(
+        "damper_shaft",
+        "diameter_mm",
+        float(base_model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])),
+        0.0,
+    )
+    pos_shaft_d = _nested_float(
+        "positive_chamber_shaft",
+        "diameter_mm",
+        float(
+            base_model.get(
+                "air_positive_shaft_diameter_mm",
+                _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"],
+            )
+        ),
+        0.0,
+    )
+    piston_t = _nested_float(
+        "piston",
+        "thickness_mm",
+        float(
+            base_model.get(
+                "air_piston_head_thickness_mm",
+                _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"],
+            )
+        ),
+        0.0,
+    )
+    body_gap = _parse_optional_finite(visual.get("body_end_gap_mm"))
+    if body_gap is None:
+        body_gap = _parse_optional_finite(base_model.get("body_eyelet_gap_mm"))
+    if body_gap is None:
+        body_gap = _DEFAULT_SHOCK_MODEL["body_eyelet_gap_mm"]
+    shaft_gap = _parse_optional_finite(visual.get("shaft_end_gap_mm"))
+    if shaft_gap is None:
+        shaft_gap = _parse_optional_finite(base_model.get("shaft_eyelet_gap_mm"))
+    if shaft_gap is None:
+        shaft_gap = _DEFAULT_SHOCK_MODEL["shaft_eyelet_gap_mm"]
+
+    return {
+        "air_chamber_diameter_mm": swept_d,
+        "body_eyelet_gap_mm": max(0.0, float(body_gap)),
+        "shaft_eyelet_gap_mm": max(0.0, float(shaft_gap)),
+        "air_chamber_length_mm": swept_len,
+        "air_negative_chamber_length_mm": neg_len,
+        "air_piston_head_thickness_mm": piston_t,
+        "air_shaft_diameter_mm": damper_shaft_d,
+        "air_positive_shaft_diameter_mm": pos_shaft_d,
+    }
+
+
+def _shock_visual_air_state(
+    model: dict[str, object],
+    stroke_mm: float,
+    visual: Optional[dict[str, object]] = None,
+) -> dict[str, float]:
+    visual_model = (
+        visual
+        if isinstance(visual, dict)
+        else _normalize_shock_visual_model(model.get("visual_model"), model)
+    )
+
+    body_end_positive = (
+        visual_model.get("body_end_positive_chamber")
+        if isinstance(visual_model.get("body_end_positive_chamber"), dict)
+        else {}
+    )
+    pos_annulus = (
+        visual_model.get("positive_annular_chamber")
+        if isinstance(visual_model.get("positive_annular_chamber"), dict)
+        else {}
+    )
+    swept = (
+        visual_model.get("swept_air_chamber")
+        if isinstance(visual_model.get("swept_air_chamber"), dict)
+        else {}
+    )
+    neg_ext = (
+        visual_model.get("negative_chamber_extension")
+        if isinstance(visual_model.get("negative_chamber_extension"), dict)
+        else {}
+    )
+    neg_annulus = (
+        visual_model.get("negative_annular_chamber")
+        if isinstance(visual_model.get("negative_annular_chamber"), dict)
+        else {}
+    )
+    damper_shaft = (
+        visual_model.get("damper_shaft")
+        if isinstance(visual_model.get("damper_shaft"), dict)
+        else {}
+    )
+    pos_shaft = (
+        visual_model.get("positive_chamber_shaft")
+        if isinstance(visual_model.get("positive_chamber_shaft"), dict)
+        else {}
+    )
+    piston = (
+        visual_model.get("piston")
+        if isinstance(visual_model.get("piston"), dict)
+        else {}
+    )
+
+    swept_d = max(
+        1.0,
+        float(
+            swept.get(
+                "diameter_mm",
+                model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"]),
+            )
+        ),
+    )
+    swept_len = max(
+        1e-3,
+        float(
+            swept.get(
+                "length_mm",
+                model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"]),
+            )
+        ),
+    )
+    body_end_pos_len = max(0.0, float(body_end_positive.get("length_mm", 0.0)))
+    body_end_pos_d = max(0.0, float(body_end_positive.get("diameter_mm", swept_d)))
+    pos_annulus_len = max(0.0, float(pos_annulus.get("length_mm", 0.0)))
+    pos_annulus_inner_d = max(0.0, float(pos_annulus.get("inner_diameter_mm", swept_d)))
+    pos_annulus_outer_d = max(
+        pos_annulus_inner_d,
+        float(pos_annulus.get("outer_diameter_mm", swept_d)),
+    )
+    neg_ext_len = max(
+        0.0,
+        float(
+            neg_ext.get(
+                "length_mm",
+                model.get(
+                    "air_negative_chamber_length_mm",
+                    _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"],
+                ),
+            )
+        ),
+    )
+    neg_ext_d = max(0.0, float(neg_ext.get("diameter_mm", swept_d)))
+    neg_annulus_len = max(0.0, float(neg_annulus.get("length_mm", 0.0)))
+    neg_annulus_inner_d = max(0.0, float(neg_annulus.get("inner_diameter_mm", swept_d)))
+    neg_annulus_outer_d = max(
+        neg_annulus_inner_d,
+        float(neg_annulus.get("outer_diameter_mm", swept_d)),
+    )
+    damper_shaft_d = max(
+        0.0,
+        float(
+            damper_shaft.get(
+                "diameter_mm",
+                model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"]),
+            )
+        ),
+    )
+    pos_shaft_d = max(
+        0.0,
+        float(
+            pos_shaft.get(
+                "diameter_mm",
+                model.get(
+                    "air_positive_shaft_diameter_mm",
+                    _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"],
+                ),
+            )
+        ),
+    )
+    piston_t = max(
+        0.0,
+        float(
+            piston.get(
+                "thickness_mm",
+                model.get(
+                    "air_piston_head_thickness_mm",
+                    _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"],
+                ),
+            )
+        ),
+    )
+
+    stroke = max(0.0, min(float(stroke_mm), swept_len))
+    swept_start = body_end_pos_len
+    swept_end = swept_start + swept_len
+    positive_annulus_end = min(swept_end, swept_start + pos_annulus_len)
+    piston_right = max(swept_start, min(swept_end, swept_end - stroke))
+    piston_left = max(swept_start, piston_right - piston_t)
+    positive_swept_end = piston_left
+    negative_swept_start = piston_right
+
+    def _circle_area(diameter_mm: float) -> float:
+        return math.pi * (max(0.0, diameter_mm) ** 2) * 0.25
+
+    pos_area_fixed = max(0.0, _circle_area(body_end_pos_d) - _circle_area(pos_shaft_d))
+    pos_area_annulus = max(0.0, _circle_area(pos_annulus_outer_d) - _circle_area(pos_annulus_inner_d))
+    pos_area_swept = max(0.0, _circle_area(swept_d) - _circle_area(pos_shaft_d))
+    neg_area_swept = max(0.0, _circle_area(swept_d) - _circle_area(damper_shaft_d))
+    neg_area_ext = max(0.0, _circle_area(neg_ext_d) - _circle_area(damper_shaft_d))
+    neg_area_annulus = max(0.0, _circle_area(neg_annulus_outer_d) - _circle_area(neg_annulus_inner_d))
+
+    pos_fixed_volume = pos_area_fixed * body_end_pos_len
+    pos_annulus_volume = pos_area_annulus * max(0.0, positive_annulus_end - swept_start)
+    pos_swept_volume = pos_area_swept * max(0.0, positive_swept_end - swept_start)
+    neg_swept_volume = neg_area_swept * max(0.0, swept_end - negative_swept_start)
+    neg_ext_volume = neg_area_ext * neg_ext_len
+    neg_annulus_volume = neg_area_annulus * neg_annulus_len
+
+    return {
+        "positive_total_volume_mm3": pos_fixed_volume + pos_annulus_volume + pos_swept_volume,
+        "negative_total_volume_mm3": neg_swept_volume + neg_ext_volume + neg_annulus_volume,
+        "positive_swept_area_mm2": pos_area_swept,
+        "negative_swept_area_mm2": neg_area_swept,
+    }
+
+
 def _build_full_default_shock_model(overrides: Optional[dict] = None) -> dict[str, object]:
     model: dict[str, object] = dict(_DEFAULT_SHOCK_MODEL)
     if isinstance(overrides, dict):
@@ -3020,6 +3280,7 @@ def _build_full_default_shock_model(overrides: Optional[dict] = None) -> dict[st
         overrides.get("visual_model") if isinstance(overrides, dict) else None,
         model,
     )
+    model.update(_derive_legacy_shock_fields_from_visual_model(model["visual_model"], model))
     return model
 
 
@@ -3064,6 +3325,7 @@ def _coerce_full_shock_model_doc(raw_model) -> dict[str, object]:
         model[key] = float(parsed)
 
     model["visual_model"] = _coerce_full_shock_visual_model(raw_model.get("visual_model"))
+    model.update(_derive_legacy_shock_fields_from_visual_model(model["visual_model"], model))
     return model
 
 
@@ -3640,6 +3902,7 @@ def _normalize_shock_geometry_config(geometry: Optional[dict]) -> tuple[str, dic
         raw_model.get("visual_model") if isinstance(raw_model, dict) else None,
         model,
     )
+    model.update(_derive_legacy_shock_fields_from_visual_model(model["visual_model"], model))
 
     return shock_type, model
 
@@ -3669,47 +3932,11 @@ def _compute_shock_force_and_rate_series(
             rate_series.append(rate)
         return force_series, rate_series
 
-    d_chamber_mm = max(
-        1e-6,
-        float(model.get("air_chamber_diameter_mm", _DEFAULT_SHOCK_MODEL["air_chamber_diameter_mm"])),
+    visual_model = (
+        model.get("visual_model")
+        if isinstance(model.get("visual_model"), dict)
+        else _normalize_shock_visual_model(None, model)
     )
-    l_pos_mm = max(
-        1e-6,
-        float(model.get("air_chamber_length_mm", _DEFAULT_SHOCK_MODEL["air_chamber_length_mm"])),
-    )
-    l_neg_mm = max(
-        1e-6,
-        float(
-            model.get(
-                "air_negative_chamber_length_mm",
-                _DEFAULT_SHOCK_MODEL["air_negative_chamber_length_mm"],
-            )
-        ),
-    )
-    piston_t_mm = max(
-        0.0,
-        float(
-            model.get(
-                "air_piston_head_thickness_mm",
-                _DEFAULT_SHOCK_MODEL["air_piston_head_thickness_mm"],
-            )
-        ),
-    )
-    d_shaft_mm = max(
-        1e-6,
-        float(model.get("air_shaft_diameter_mm", _DEFAULT_SHOCK_MODEL["air_shaft_diameter_mm"])),
-    )
-    d_shaft_mm = min(d_shaft_mm, max(1e-6, d_chamber_mm - 0.5))
-    d_pos_shaft_mm = max(
-        0.0,
-        float(
-            model.get(
-                "air_positive_shaft_diameter_mm",
-                _DEFAULT_SHOCK_MODEL["air_positive_shaft_diameter_mm"],
-            )
-        ),
-    )
-    d_pos_shaft_mm = min(d_pos_shaft_mm, d_shaft_mm, max(0.0, d_chamber_mm - 0.5))
     p0_psi = max(
         1e-6,
         float(model.get("air_initial_pressure_psi", _DEFAULT_SHOCK_MODEL["air_initial_pressure_psi"])),
@@ -3723,11 +3950,9 @@ def _compute_shock_force_and_rate_series(
     if t_ref_k <= 0 or t_eval_k <= 0:
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
-    chamber_area_m2 = math.pi * ((d_chamber_mm * 1e-3) ** 2) * 0.25
-    neg_shaft_area_m2 = math.pi * ((d_shaft_mm * 1e-3) ** 2) * 0.25
-    pos_shaft_area_m2 = math.pi * ((d_pos_shaft_mm * 1e-3) ** 2) * 0.25
-    pos_area_m2 = chamber_area_m2 - pos_shaft_area_m2
-    neg_area_m2 = chamber_area_m2 - neg_shaft_area_m2
+    state0 = _shock_visual_air_state(model, 0.0, visual_model)
+    pos_area_m2 = max(0.0, float(state0.get("positive_swept_area_mm2", 0.0))) * 1e-6
+    neg_area_m2 = max(0.0, float(state0.get("negative_swept_area_mm2", 0.0))) * 1e-6
     if (
         not math.isfinite(pos_area_m2)
         or not math.isfinite(neg_area_m2)
@@ -3736,10 +3961,8 @@ def _compute_shock_force_and_rate_series(
     ):
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
-    pos_len_eff_mm = max(1e-3, l_pos_mm - piston_t_mm)
-    neg_len_eff_mm = max(1e-3, l_neg_mm - piston_t_mm)
-    v_pos0_m3 = pos_area_m2 * (pos_len_eff_mm * 1e-3)
-    v_neg0_m3 = neg_area_m2 * (neg_len_eff_mm * 1e-3)
+    v_pos0_m3 = max(0.0, float(state0.get("positive_total_volume_mm3", 0.0))) * 1e-9
+    v_neg0_m3 = max(0.0, float(state0.get("negative_total_volume_mm3", 0.0))) * 1e-9
     if not math.isfinite(v_pos0_m3) or not math.isfinite(v_neg0_m3) or v_pos0_m3 <= 0 or v_neg0_m3 <= 0:
         return [None for _ in shock_stroke_series_mm], [None for _ in shock_stroke_series_mm]
 
@@ -3751,10 +3974,10 @@ def _compute_shock_force_and_rate_series(
     min_neg_m3 = v_neg0_m3 * 0.02
 
     def _volumes_at(stroke_mm: float) -> tuple[float, float]:
-        stroke_m = max(0.0, float(stroke_mm)) * 1e-3
+        state = _shock_visual_air_state(model, stroke_mm, visual_model)
         return (
-            v_pos0_m3 - pos_area_m2 * stroke_m,
-            v_neg0_m3 + neg_area_m2 * stroke_m,
+            max(0.0, float(state.get("positive_total_volume_mm3", 0.0))) * 1e-9,
+            max(0.0, float(state.get("negative_total_volume_mm3", 0.0))) * 1e-9,
         )
 
     def _force_at(stroke_mm: float) -> Optional[float]:
